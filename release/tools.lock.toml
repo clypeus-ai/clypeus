@@ -1,5 +1,7 @@
-# Pinned tool images for the release pipeline (W3 signing/SBOM), kept explicit
-# so a release never depends on a floating tag.
+# Pinned tool images for the release pipeline (scripts/release.sh): SBOM
+# generation and signing run in these images so a release never depends on a
+# floating tag or a host install. The signing key and certificate live outside
+# the repository.
 [images]
 cosign = "ghcr.io/sigstore/cosign/cosign:v2.4.1"
 syft = "anchore/syft:v1.14.1"

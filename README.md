@@ -100,6 +100,17 @@ for a worked adapter example.
 `clypeus-conformance` runs the contract suite against store and broker
 implementations; run it from an adapter's integration tests.
 
+## Documentation
+
+| Document | Contents |
+|---|---|
+| `docs/architecture.md` | Core concepts, boundaries, and data flow |
+| `docs/extension-guide.md` | A worked adapter example for the trait set |
+| `docs/embedding.md` | Server and in-process embedding, extension points, conformance |
+| `docs/deployment.md` | Configuration, Docker Compose, production notes |
+| `docs/api.md` | HTTP surface and the SSE contract |
+| `docs/release.md` | Versioning, signing, SBOM, and the release pipeline |
+
 ## Development
 
 ```bash
@@ -108,12 +119,22 @@ CLYPEUS_TEST_DATABASE_URL=postgres://... cargo test -p clypeus-store-postgres
 ```
 
 `ci/github-ci.yml` is the canonical GitHub Actions workflow (isolation gate,
-fmt/clippy/tests, PostgreSQL conformance, OpenAPI drift, cargo-deny). It is
-installed at `.github/workflows/ci.yml` by a token that carries the GitHub
-`workflow` scope:
+fmt/clippy/tests, PostgreSQL conformance, OpenAPI drift, cargo-deny), and
+`ci/github-release.yml` is the canonical release workflow (image, SBOM,
+keyless cosign signature). Install them at `.github/workflows/` with a token
+that carries the GitHub `workflow` scope:
 
 ```bash
-mkdir -p .github/workflows && cp ci/github-ci.yml .github/workflows/ci.yml
+mkdir -p .github/workflows
+cp ci/github-ci.yml .github/workflows/ci.yml
+cp ci/github-release.yml .github/workflows/release.yml
+```
+
+Releases are cut with a local signing key and a pinned tool set:
+
+```bash
+CLYPEUS_RELEASE_REGISTRY=ghcr.io/<owner>/clypeus COSIGN_KEY=~/.config/clypeus/cosign.key \
+  scripts/release.sh 1.0.0
 ```
 
 ## License

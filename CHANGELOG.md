@@ -3,6 +3,54 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project adheres to Semantic Versioning.
 
+## [1.0.0] - 2026-09-20
+
+First stable release. The public surface is the crate set listed in the
+README, the `clypeus` binary, and `openapi/clypeus-v1.json`. Consumers pin an
+exact tag; a breaking change moves the API to `/v2` and the crates to a new
+major version.
+
+### Added
+
+* Embedding guide (`docs/embedding.md`): in-process library composition,
+  standalone server deployment, extension points, and the conformance suite.
+* Release guide (`docs/release.md`) and a signed image pipeline
+  (`scripts/release.sh`) with a CycloneDX SBOM and cosign signature.
+
+### Changed
+
+* Crate version is `1.0.0`; repository metadata points at the canonical
+  repository host.
+* `PromptProfile`, `ProfileStore`, and `TurnContextProvider` are wired into
+  every turn, so embedders can supply profile text and per-turn context.
+* `Principal.attributes` are projected into the tool execution context.
+* `connect` can own its schema migrations for embedders that manage the
+  schema themselves.
+
+### Fixed
+
+* The streamed-turn guard now disarms after a terminal state is persisted,
+  so completed replies are no longer rewritten as `turn_incomplete`. Earlier
+  releases lost the reply content, reasoning, and usage on streamed turns.
+
+## [0.1.3] - 2026-09-20
+
+### Added
+
+* Schema-owning connections for embedders with their own migration pipeline.
+
+## [0.1.2] - 2026-09-20
+
+### Added
+
+* Prompt profile and turn context providers are applied to turns.
+
+## [0.1.1] - 2026-09-20
+
+### Added
+
+* Principal attributes are projected into the tool execution context.
+
 ## [0.1.0] - 2026-09-20
 
 Initial release of the Clypeus core.

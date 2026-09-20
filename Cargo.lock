@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-auth-jwks"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "clypeus-core",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-conformance"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-provider-anthropic"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-provider-openai"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-secret-file"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "clypeus-core",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-store-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-store-postgres"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clypeus-conformance",
  "clypeus-core",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-store-sql"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "clypeus-store-sqlite"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clypeus-conformance",
  "clypeus-core",
