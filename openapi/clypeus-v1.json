@@ -1,0 +1,2386 @@
+{
+  "components": {
+    "schemas": {
+      "ApprovalDto": {
+        "properties": {
+          "argumentsHash": {
+            "type": "string"
+          },
+          "confirmField": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "impact": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "expiresAtUtc",
+          "argumentsHash",
+          "impact"
+        ],
+        "type": "object"
+      },
+      "AuditItemKind": {
+        "description": "What kind of audited item produced a record.",
+        "enum": [
+          "tool",
+          "function"
+        ],
+        "type": "string"
+      },
+      "AuditListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditRecord"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
+      "AuditRecord": {
+        "description": "One append-only audit record. Arguments are stored redacted; the hash binds\nthe record to the exact canonical arguments.",
+        "properties": {
+          "approvalId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "argumentsHash": {
+            "type": "string"
+          },
+          "argumentsRedacted": {},
+          "authMode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "downstreamStatus": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "durationMs": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "egressPathTemplate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "egressService": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "itemKind": {
+            "$ref": "#/components/schemas/AuditItemKind"
+          },
+          "itemName": {
+            "type": "string"
+          },
+          "messageId": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "resultBytes": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "risk": {
+            "type": "string"
+          },
+          "scopeId": {
+            "type": "string"
+          },
+          "scopesUsed": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "threadId": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "toolCallId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "scopeId",
+          "subject",
+          "itemName",
+          "itemKind",
+          "risk",
+          "argumentsHash",
+          "outcome",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "ChatMessage": {
+        "description": "One chat message used in the request and response flow.",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ChatRole"
+          },
+          "toolCallId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "toolCalls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "type": "object"
+      },
+      "ChatRole": {
+        "description": "Chat message role.",
+        "enum": [
+          "user",
+          "assistant",
+          "system",
+          "tool"
+        ],
+        "type": "string"
+      },
+      "CompletionsRequest": {
+        "properties": {
+          "maxOutputTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "toolChoice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolSpec"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "ConnectionTestDto": {
+        "properties": {
+          "checkedAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "elapsedMs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelCount": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "succeeded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "succeeded",
+          "elapsedMs",
+          "checkedAtUtc"
+        ],
+        "type": "object"
+      },
+      "CreateThreadRequest": {
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "CreateTurnRequest": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pageContext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageContextDto"
+              }
+            ]
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "EditTurnRequest": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pageContext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageContextDto"
+              }
+            ]
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "FeedbackDto": {
+        "properties": {
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "messageId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "rating": {
+            "type": "string"
+          },
+          "updatedAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "messageId",
+          "rating",
+          "createdAtUtc",
+          "updatedAtUtc"
+        ],
+        "type": "object"
+      },
+      "FunctionDescriptorDto": {
+        "description": "Catalog entry returned by `GET /v1/functions`.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "inputSchema": {},
+          "name": {
+            "type": "string"
+          },
+          "outputSchema": {},
+          "promptHash": {
+            "type": "string"
+          },
+          "requiredScopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "version": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "description",
+          "promptHash",
+          "inputSchema",
+          "outputSchema",
+          "requiredScopes"
+        ],
+        "type": "object"
+      },
+      "FunctionDiagnosticsDto": {
+        "properties": {
+          "attempts": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "durationMs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoningLevel": {
+            "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TokenUsage"
+              }
+            ]
+          },
+          "validation": {}
+        },
+        "required": [
+          "model",
+          "reasoningLevel",
+          "durationMs",
+          "attempts"
+        ],
+        "type": "object"
+      },
+      "FunctionListResponse": {
+        "properties": {
+          "functions": {
+            "items": {
+              "$ref": "#/components/schemas/FunctionDescriptorDto"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "functions"
+        ],
+        "type": "object"
+      },
+      "MessageDto": {
+        "properties": {
+          "completedAtUtc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "contextJson": {},
+          "contextVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "errorDetail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "feedback": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeedbackDto"
+              }
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentMessageId": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoningContent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "startedAtUtc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "threadId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "toolCallId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "toolCalls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallDto"
+            },
+            "type": "array"
+          },
+          "updatedAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TokenUsage"
+              }
+            ]
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/MessageVersionDto"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "threadId",
+          "role",
+          "content",
+          "toolCalls",
+          "status",
+          "version",
+          "versions",
+          "createdAtUtc",
+          "updatedAtUtc"
+        ],
+        "type": "object"
+      },
+      "MessageVersionDto": {
+        "properties": {
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "isActive",
+          "status",
+          "createdAtUtc"
+        ],
+        "type": "object"
+      },
+      "ModelCapability": {
+        "description": "One model advertised by a provider catalog.",
+        "properties": {
+          "defaultReasoningLevel": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoningLevels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "model",
+          "reasoningLevels",
+          "defaultReasoningLevel"
+        ],
+        "type": "object"
+      },
+      "ModelsPreviewRequest": {
+        "properties": {
+          "apiKey": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "providerKind": {
+            "$ref": "#/components/schemas/ProviderKind"
+          }
+        },
+        "required": [
+          "baseUrl",
+          "apiKey",
+          "providerKind"
+        ],
+        "type": "object"
+      },
+      "ModelsResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelCapability"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "type": "object"
+      },
+      "PageContextDto": {
+        "properties": {
+          "page": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "statusText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Problem": {
+        "description": "Problem response body.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "status": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "type": "object"
+      },
+      "ProfileSelection": {
+        "description": "How a scope selects its system prompt.",
+        "oneOf": [
+          {
+            "description": "Use the registered built-in profile, optionally extended with\napplication/operator instructions.",
+            "properties": {
+              "Builtin": {
+                "description": "Use the registered built-in profile, optionally extended with\napplication/operator instructions.",
+                "properties": {
+                  "custom": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "Builtin"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Use the supplied prompt verbatim.",
+            "properties": {
+              "Custom": {
+                "description": "Use the supplied prompt verbatim.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "Custom"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Send no system prompt at all.",
+            "enum": [
+              "Disabled"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "ProviderKind": {
+        "description": "Provider backend a scope is configured to use.",
+        "enum": [
+          "openai",
+          "anthropic"
+        ],
+        "type": "string"
+      },
+      "RegenerateTurnRequest": {
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pageContext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageContextDto"
+              }
+            ]
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "RunFunctionRequest": {
+        "description": "Request body for `POST /v1/functions/{name}`.",
+        "properties": {
+          "inputs": {},
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "inputs"
+        ],
+        "type": "object"
+      },
+      "RunFunctionResponse": {
+        "properties": {
+          "diagnostics": {
+            "$ref": "#/components/schemas/FunctionDiagnosticsDto"
+          },
+          "function": {
+            "type": "string"
+          },
+          "generationId": {
+            "type": "string"
+          },
+          "output": {},
+          "promptHash": {
+            "type": "string"
+          },
+          "version": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "function",
+          "version",
+          "promptHash",
+          "generationId",
+          "output",
+          "diagnostics"
+        ],
+        "type": "object"
+      },
+      "ScopeSettingsDto": {
+        "properties": {
+          "apiKeyStored": {
+            "type": "boolean"
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "defaultModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extensions": {},
+          "maxOutputTokens": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "profile": {},
+          "providerKind": {
+            "$ref": "#/components/schemas/ProviderKind"
+          },
+          "scopeId": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "updatedAtUtc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scopeId",
+          "providerKind",
+          "apiKeyStored",
+          "timeoutMs",
+          "maxOutputTokens",
+          "profile",
+          "extensions",
+          "createdAtUtc"
+        ],
+        "type": "object"
+      },
+      "SetFeedbackRequest": {
+        "properties": {
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rating": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rating"
+        ],
+        "type": "object"
+      },
+      "SubmitApprovalRequest": {
+        "properties": {
+          "argumentsHash": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "typedConfirm": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision",
+          "argumentsHash"
+        ],
+        "type": "object"
+      },
+      "ThreadDto": {
+        "properties": {
+          "activeLeafMessageId": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "scopeId": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updatedAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "scopeId",
+          "subject",
+          "title",
+          "pinned",
+          "createdAtUtc",
+          "updatedAtUtc"
+        ],
+        "type": "object"
+      },
+      "ThreadListResponse": {
+        "properties": {
+          "threads": {
+            "items": {
+              "$ref": "#/components/schemas/ThreadDto"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "threads"
+        ],
+        "type": "object"
+      },
+      "ThreadViewResponse": {
+        "properties": {
+          "activeLeafMessageId": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageDto"
+            },
+            "type": "array"
+          },
+          "thread": {
+            "$ref": "#/components/schemas/ThreadDto"
+          }
+        },
+        "required": [
+          "thread",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "TokenUsage": {
+        "description": "Token accounting for one provider round or one whole turn.",
+        "properties": {
+          "cachedTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "completionTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "promptTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reasoningTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "totalTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ToolCall": {
+        "description": "One provider-requested tool call with structured arguments.",
+        "properties": {
+          "arguments": {},
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "arguments"
+        ],
+        "type": "object"
+      },
+      "ToolCallDto": {
+        "properties": {
+          "approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApprovalDto"
+              }
+            ]
+          },
+          "arguments": {},
+          "completedAtUtc": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "durationMs": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ToolCallErrorDto"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "result": {},
+          "risk": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ToolCallStatus"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "arguments",
+          "risk",
+          "status",
+          "createdAtUtc"
+        ],
+        "type": "object"
+      },
+      "ToolCallErrorDto": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "ToolCallStatus": {
+        "description": "Lifecycle state of one tool call.",
+        "enum": [
+          "requested",
+          "awaiting_approval",
+          "approved",
+          "denied",
+          "running",
+          "succeeded",
+          "failed",
+          "expired"
+        ],
+        "type": "string"
+      },
+      "ToolCatalogEntryDto": {
+        "properties": {
+          "approval": {
+            "type": "string"
+          },
+          "confirmField": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "requiredScopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "schema": {}
+        },
+        "required": [
+          "name",
+          "description",
+          "schema",
+          "requiredScopes",
+          "risk",
+          "approval"
+        ],
+        "type": "object"
+      },
+      "ToolCatalogResponse": {
+        "properties": {
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCatalogEntryDto"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "type": "object"
+      },
+      "ToolSpec": {
+        "description": "Provider-facing tool definition.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "inputSchema": {
+            "description": "Strict JSON Schema (`additionalProperties: false`)."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "inputSchema"
+        ],
+        "type": "object"
+      },
+      "TurnResponse": {
+        "properties": {
+          "assistantMessage": {
+            "$ref": "#/components/schemas/MessageDto"
+          },
+          "thread": {
+            "$ref": "#/components/schemas/ThreadDto"
+          },
+          "userMessage": {
+            "$ref": "#/components/schemas/MessageDto"
+          }
+        },
+        "required": [
+          "thread",
+          "userMessage",
+          "assistantMessage"
+        ],
+        "type": "object"
+      },
+      "UpdateScopeSettingsRequest": {
+        "properties": {
+          "apiKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clearApiKey": {
+            "type": "boolean"
+          },
+          "defaultModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxOutputTokens": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "profile": {
+            "description": "Profile selection: `{\"mode\": \"builtin\"|\"custom\"|\"disabled\", ...}`."
+          },
+          "providerKind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderKind"
+              }
+            ]
+          },
+          "timeoutMs": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UpdateThreadRequest": {
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UsageEntryDto": {
+        "properties": {
+          "createdAtUtc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "messageId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoningLevel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/TokenUsage"
+          }
+        },
+        "required": [
+          "messageId",
+          "status",
+          "usage",
+          "createdAtUtc"
+        ],
+        "type": "object"
+      },
+      "UsageResponse": {
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/UsageEntryDto"
+            },
+            "type": "array"
+          },
+          "total": {
+            "$ref": "#/components/schemas/TokenUsage"
+          }
+        },
+        "required": [
+          "total",
+          "messages"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "name": "Clypeus contributors"
+    },
+    "description": "Policy-first AI gateway: provider completions, conversations, typed tool egress, approvals, and an append-only audit trail.",
+    "license": {
+      "name": "MIT OR Apache-2.0"
+    },
+    "title": "Clypeus API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/admin/v1/scopes/{scope}/models/preview": {
+      "post": {
+        "operationId": "admin_preview_models",
+        "parameters": [
+          {
+            "description": "Scope id",
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelsPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            },
+            "description": "Model catalog"
+          }
+        },
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/admin/v1/scopes/{scope}/settings": {
+      "get": {
+        "operationId": "get_scope_settings",
+        "parameters": [
+          {
+            "description": "Scope id",
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopeSettingsDto"
+                }
+              }
+            },
+            "description": "Scope settings"
+          }
+        },
+        "tags": [
+          "Admin"
+        ]
+      },
+      "put": {
+        "operationId": "put_scope_settings",
+        "parameters": [
+          {
+            "description": "Scope id",
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateScopeSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopeSettingsDto"
+                }
+              }
+            },
+            "description": "Scope settings"
+          }
+        },
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/admin/v1/scopes/{scope}/settings/test": {
+      "post": {
+        "operationId": "test_scope_settings",
+        "parameters": [
+          {
+            "description": "Scope id",
+            "in": "path",
+            "name": "scope",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionTestDto"
+                }
+              }
+            },
+            "description": "Probe result"
+          }
+        },
+        "tags": [
+          "Admin"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Liveness"
+          }
+        },
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus metrics"
+          }
+        },
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Readiness"
+          },
+          "503": {
+            "description": "Unavailable"
+          }
+        },
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "operationId": "list_audit",
+        "parameters": [
+          {
+            "description": "Page size",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page offset",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditListResponse"
+                }
+              }
+            },
+            "description": "Audit page"
+          }
+        },
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/v1/audit/export": {
+      "get": {
+        "operationId": "export_audit",
+        "responses": {
+          "200": {
+            "description": "Audit export"
+          }
+        },
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "operationId": "completions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompletionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Completion"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Invalid request"
+          }
+        },
+        "tags": [
+          "Completions"
+        ]
+      }
+    },
+    "/v1/functions": {
+      "get": {
+        "operationId": "list_functions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FunctionListResponse"
+                }
+              }
+            },
+            "description": "Function catalog"
+          }
+        },
+        "tags": [
+          "Functions"
+        ]
+      }
+    },
+    "/v1/functions/{name}": {
+      "post": {
+        "operationId": "run_function",
+        "parameters": [
+          {
+            "description": "Function name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunFunctionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunFunctionResponse"
+                }
+              }
+            },
+            "description": "Function result"
+          }
+        },
+        "tags": [
+          "Functions"
+        ]
+      }
+    },
+    "/v1/messages/{message_id}": {
+      "patch": {
+        "operationId": "edit_message",
+        "parameters": [
+          {
+            "description": "User message id",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResponse"
+                }
+              }
+            },
+            "description": "Edited turn"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      }
+    },
+    "/v1/messages/{message_id}/activate": {
+      "post": {
+        "operationId": "activate_message",
+        "parameters": [
+          {
+            "description": "Message id",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Activated"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      }
+    },
+    "/v1/messages/{message_id}/feedback": {
+      "delete": {
+        "operationId": "clear_feedback",
+        "parameters": [
+          {
+            "description": "Assistant message id",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cleared"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      },
+      "put": {
+        "operationId": "set_feedback",
+        "parameters": [
+          {
+            "description": "Assistant message id",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackDto"
+                }
+              }
+            },
+            "description": "Feedback"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      }
+    },
+    "/v1/messages/{message_id}/regenerate": {
+      "post": {
+        "operationId": "regenerate_message",
+        "parameters": [
+          {
+            "description": "Assistant message id",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegenerateTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResponse"
+                }
+              }
+            },
+            "description": "Regenerated turn"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "operationId": "list_models",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            },
+            "description": "Model catalog"
+          }
+        },
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/v1/models/preview": {
+      "post": {
+        "operationId": "preview_models",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelsPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            },
+            "description": "Model catalog"
+          }
+        },
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/v1/threads": {
+      "get": {
+        "operationId": "list_threads",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadListResponse"
+                }
+              }
+            },
+            "description": "Threads"
+          }
+        },
+        "tags": [
+          "Threads"
+        ]
+      },
+      "post": {
+        "operationId": "create_thread",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateThreadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadDto"
+                }
+              }
+            },
+            "description": "Thread"
+          }
+        },
+        "tags": [
+          "Threads"
+        ]
+      }
+    },
+    "/v1/threads/{thread_id}": {
+      "delete": {
+        "operationId": "delete_thread",
+        "parameters": [
+          {
+            "description": "Thread id",
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        },
+        "tags": [
+          "Threads"
+        ]
+      },
+      "get": {
+        "operationId": "get_thread",
+        "parameters": [
+          {
+            "description": "Thread id",
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadViewResponse"
+                }
+              }
+            },
+            "description": "Thread view"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "tags": [
+          "Threads"
+        ]
+      },
+      "patch": {
+        "operationId": "update_thread",
+        "parameters": [
+          {
+            "description": "Thread id",
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateThreadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadDto"
+                }
+              }
+            },
+            "description": "Thread"
+          }
+        },
+        "tags": [
+          "Threads"
+        ]
+      }
+    },
+    "/v1/threads/{thread_id}/messages": {
+      "post": {
+        "operationId": "create_message",
+        "parameters": [
+          {
+            "description": "Thread id",
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResponse"
+                }
+              }
+            },
+            "description": "Turn"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      }
+    },
+    "/v1/threads/{thread_id}/usage": {
+      "get": {
+        "operationId": "thread_usage",
+        "parameters": [
+          {
+            "description": "Thread id",
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageResponse"
+                }
+              }
+            },
+            "description": "Usage"
+          }
+        },
+        "tags": [
+          "Threads"
+        ]
+      }
+    },
+    "/v1/tool-calls/{tool_call_id}/approvals": {
+      "post": {
+        "operationId": "submit_approval",
+        "parameters": [
+          {
+            "description": "Tool call id",
+            "in": "path",
+            "name": "tool_call_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitApprovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResponse"
+                }
+              }
+            },
+            "description": "Resumed turn"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Expired or replayed"
+          }
+        },
+        "tags": [
+          "Approvals"
+        ]
+      }
+    },
+    "/v1/tools": {
+      "get": {
+        "operationId": "list_tools",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolCatalogResponse"
+                }
+              }
+            },
+            "description": "Tool catalog"
+          }
+        },
+        "tags": [
+          "Tools"
+        ]
+      }
+    }
+  }
+}

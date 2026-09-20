@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  isolation:
+    name: isolation gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for foreign product references
+        run: ./scripts/check-isolation.sh
+
+  rust:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: OpenAPI drift
+        run: |
+          cargo run -p clypeus-server --bin clypeus -- --print-openapi > /tmp/clypeus-v1.json
+          diff -u openapi/clypeus-v1.json /tmp/clypeus-v1.json
+
+  postgres:
+    name: postgres conformance
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: clypeus
+          POSTGRES_PASSWORD: clypeus
+          POSTGRES_DB: clypeus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U clypeus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p clypeus-store-postgres
+        env:
+          CLYPEUS_TEST_DATABASE_URL: postgres://clypeus:clypeus@localhost:5432/clypeus
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources

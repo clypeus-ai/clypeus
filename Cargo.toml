@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clypeus-core",
+    "crates/clypeus-auth-jwks",
+    "crates/clypeus-conformance",
+    "crates/clypeus-provider-anthropic",
+    "crates/clypeus-provider-openai",
+    "crates/clypeus-secret-file",
+    "crates/clypeus-server",
+    "crates/clypeus-store-memory",
+    "crates/clypeus-store-postgres",
+    "crates/clypeus-store-sql",
+    "crates/clypeus-store-sqlite",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/clypeus-ai/clypeus"
+homepage = "https://github.com/clypeus-ai/clypeus"
+authors = ["Clypeus contributors"]
+keywords = ["ai", "gateway", "policy", "tools", "agents"]
+categories = ["web-programming::http-server"]
+
+[workspace.dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+hex = "0.4"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["any", "runtime-tokio", "tls-rustls-ring", "migrate", "macros", "json", "uuid", "chrono", "postgres", "sqlite"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+unicode-normalization = "0.1"
+url = "2"
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+clypeus-core = { path = "crates/clypeus-core", version = "0.1.0" }
+clypeus-auth-jwks = { path = "crates/clypeus-auth-jwks", version = "0.1.0" }
+clypeus-conformance = { path = "crates/clypeus-conformance", version = "0.1.0" }
+clypeus-provider-anthropic = { path = "crates/clypeus-provider-anthropic", version = "0.1.0" }
+clypeus-provider-openai = { path = "crates/clypeus-provider-openai", version = "0.1.0" }
+clypeus-secret-file = { path = "crates/clypeus-secret-file", version = "0.1.0" }
+clypeus-store-memory = { path = "crates/clypeus-store-memory", version = "0.1.0" }
+clypeus-store-postgres = { path = "crates/clypeus-store-postgres", version = "0.1.0" }
+clypeus-store-sql = { path = "crates/clypeus-store-sql", version = "0.1.0" }
+clypeus-store-sqlite = { path = "crates/clypeus-store-sqlite", version = "0.1.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

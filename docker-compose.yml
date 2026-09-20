@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: clypeus
+      POSTGRES_PASSWORD: clypeus
+      POSTGRES_DB: clypeus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clypeus"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - clypeus-postgres:/var/lib/postgresql/data
+
+  clypeus:
+    build:
+      context: .
+      dockerfile: release/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CLYPEUS_BIND_ADDR: 0.0.0.0:8080
+      CLYPEUS_STORE: postgres
+      CLYPEUS_DATABASE_URL: postgres://clypeus:clypeus@postgres:5432/clypeus
+      CLYPEUS_SECRET_DIR: /var/lib/clypeus/secrets
+      CLYPEUS_STATIC_TOKEN: ${CLYPEUS_STATIC_TOKEN:-dev-token}
+      CLYPEUS_STATIC_SCOPE: ${CLYPEUS_STATIC_SCOPE:-default}
+      CLYPEUS_STATIC_SUBJECT: ${CLYPEUS_STATIC_SUBJECT:-standalone}
+      CLYPEUS_STATIC_SCOPES: ${CLYPEUS_STATIC_SCOPES:-admin}
+      CLYPEUS_ADMIN_SCOPES: ${CLYPEUS_ADMIN_SCOPES:-admin}
+      CLYPEUS_SEED_SCOPE: ${CLYPEUS_SEED_SCOPE:-default}
+      CLYPEUS_SEED_BASE_URL: ${CLYPEUS_SEED_BASE_URL:-https://api.openai.com}
+      CLYPEUS_SEED_API_KEY: ${CLYPEUS_SEED_API_KEY:-}
+      CLYPEUS_SEED_PROVIDER: ${CLYPEUS_SEED_PROVIDER:-openai}
+      CLYPEUS_SEED_MODEL: ${CLYPEUS_SEED_MODEL:-gpt-4o-mini}
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    volumes:
+      - clypeus-secrets:/var/lib/clypeus/secrets
+
+volumes:
+  clypeus-postgres:
+  clypeus-secrets:

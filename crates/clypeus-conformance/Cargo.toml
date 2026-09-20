@@ -1,0 +1,23 @@
+[package]
+name = "clypeus-conformance"
+description = "Reusable conformance suite for clypeus-core trait implementations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+clypeus-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

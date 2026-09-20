@@ -1,0 +1,15 @@
+//! SQLite store for Clypeus.
+//!
+//! Owns the schema migrations and connects the shared SQL implementation to a
+//! SQLite database. Use `sqlite:` URLs; `sqlite::memory:` runs an isolated
+//! in-memory database suitable for tests and embedded deployments.
+
+use clypeus_core::store::StoreError;
+use clypeus_store_sql::{SqlDialect, SqlStore};
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Connects to SQLite and applies the Clypeus schema.
+pub async fn connect(url: &str) -> Result<SqlStore, StoreError> {
+    SqlStore::connect(url, SqlDialect::Sqlite, &MIGRATOR).await
+}

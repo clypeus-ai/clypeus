@@ -1,0 +1,5 @@
+# Pinned tool images for the release pipeline (W3 signing/SBOM), kept explicit
+# so a release never depends on a floating tag.
+[images]
+cosign = "ghcr.io/sigstore/cosign/cosign:v2.4.1"
+syft = "anchore/syft:v1.14.1"
