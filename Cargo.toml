@@ -33,7 +33,7 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 hex = "0.4"
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
