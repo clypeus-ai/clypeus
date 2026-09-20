@@ -125,10 +125,22 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mo
     -e COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" \
     "$cosign_image" sign --key /cosign.key --yes "${tlog_args[@]}" "$image"
 
+echo "==> attest the SBOM"
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
+    -v "$sbom:/sbom.cdx.json:ro" \
+    -v "$key:/cosign.key:ro" \
+    -e COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" \
+    "$cosign_image" attest --key /cosign.key --yes "${tlog_args[@]}" \
+    --predicate /sbom.cdx.json --type cyclonedx "$image"
+
 echo "==> verify"
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
     -v "$pub:/cosign.pub:ro" \
     "$cosign_image" verify --key /cosign.pub "${verify_args[@]}" "$image" >/dev/null
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
+    -v "$pub:/cosign.pub:ro" \
+    "$cosign_image" verify-attestation --key /cosign.pub "${verify_args[@]}" \
+    --type cyclonedx "$image" >/dev/null
 
 cp "$sbom" "${CLYPEUS_RELEASE_SBOM:-/tmp}/clypeus-v$version.cdx.json" 2>/dev/null || true
 
