@@ -77,7 +77,7 @@ docker buildx build "${builder_args[@]}" \
     --platform linux/amd64 \
     --provenance=false \
     --tag "$registry:$version" \
-    --output "type=oci,dest=$layout" \
+    --output "type=oci,dest=$layout,tar=false" \
     "$ROOT"
 
 sbom="$workdir/clypeus.cdx.json"
