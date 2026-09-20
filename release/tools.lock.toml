@@ -1,7 +1,8 @@
-# Pinned tool images for the release pipeline (scripts/release.sh): SBOM
-# generation and signing run in these images so a release never depends on a
-# floating tag or a host install. The signing key and certificate live outside
-# the repository.
+# Pinned tool images for the release pipeline (scripts/release.sh): OCI
+# transport, SBOM generation, and signing run in these images so a release
+# never depends on a floating tag or a host install. The signing key and
+# certificate live outside the repository.
 [images]
+oras = "ghcr.io/oras-project/oras:v1.3.4"
 cosign = "ghcr.io/sigstore/cosign/cosign:v2.4.1"
 syft = "anchore/syft:v1.14.1"

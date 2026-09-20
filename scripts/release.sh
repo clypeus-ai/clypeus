@@ -11,9 +11,9 @@
 #   CLYPEUS_RELEASE_BUILDER   optional; buildx builder name
 #   CLYPEUS_RELEASE_SKIP_TLOG optional; "false" uploads to the Rekor transparency log
 #
-# The pipeline: buildx build --push, CycloneDX SBOM with syft, cosign attach
-# sbom, cosign sign, cosign verify. Tool versions are pinned in
-# release/tools.lock.toml.
+# The pipeline: buildx build into an OCI layout, CycloneDX SBOM with syft,
+# OCI transport with oras, cosign attach sbom, cosign sign, cosign verify.
+# Tool versions are pinned in release/tools.lock.toml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +37,7 @@ PY
 }
 syft_image="$(tool_image syft)"
 cosign_image="$(tool_image cosign)"
+oras_image="$(tool_image oras)"
 
 manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 [[ "$version" == "$manifest_version" ]] || {
@@ -67,7 +68,7 @@ if [[ -n "${CLYPEUS_RELEASE_BUILDER:-}" ]]; then
 fi
 
 workdir="$(mktemp -d -t clypeus-release-XXXXXX)"
-tar="$workdir/image.tar"
+layout="$workdir/layout"
 trap 'rm -rf "$workdir"' EXIT
 
 echo "==> build $registry:$version"
@@ -76,24 +77,24 @@ docker buildx build "${builder_args[@]}" \
     --platform linux/amd64 \
     --provenance=false \
     --tag "$registry:$version" \
-    --output "type=docker,dest=$tar" \
+    --output "type=oci,dest=$layout" \
     "$ROOT"
-docker load --input "$tar" >/dev/null
 
 sbom="$workdir/clypeus.cdx.json"
 echo "==> SBOM (syft $syft_image)"
 docker run --rm \
-    -v "$tar:/image.tar:ro" \
+    -v "$layout:/layout:ro" \
     -v "$workdir:/out" \
-    "$syft_image" "docker-archive:/image.tar" -o "cyclonedx-json=/out/clypeus.cdx.json"
+    "$syft_image" "oci-dir:/layout" -o "cyclonedx-json=/out/clypeus.cdx.json"
 [[ -s "$sbom" ]] || { echo "syft produced no SBOM" >&2; exit 1; }
 
-echo "==> push"
-docker push "$registry:$version"
-docker tag "$registry:$version" "$registry:latest"
-docker push "$registry:latest"
-repo_digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$registry:$version")"
-digest="${repo_digest#*@}"
+echo "==> push (oras $oras_image)"
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
+    -v "$layout:/layout:ro" \
+    "$oras_image" cp --from-oci-layout "/layout:$version" "$registry:$version"
+digest="$(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
+    "$oras_image" manifest fetch --descriptor "$registry:$version" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
 image="$registry@$digest"
 echo "    digest $digest"
 
