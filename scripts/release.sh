@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, sign, and publish the release image.
+# Build, smoke-test, sign, and publish the release image.
 #
 # Usage: scripts/release.sh <version>
 #
@@ -13,9 +13,9 @@
 #   CLYPEUS_RELEASE_BUILDER   optional; buildx builder name
 #   CLYPEUS_RELEASE_SKIP_TLOG optional; "false" uploads to the Rekor transparency log
 #
-# The pipeline: buildx build into an OCI layout, CycloneDX SBOM with syft,
-# OCI transport with oras, cosign attach sbom, cosign sign, cosign verify.
-# Tool versions are pinned in release/tools.lock.toml.
+# The pipeline: buildx build, container smoke test, CycloneDX SBOM with syft,
+# OCI transport with oras, cosign attach sbom, cosign sign, cosign attest the
+# SBOM, and verification. Tool versions are pinned in release/tools.lock.toml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,6 +25,8 @@ key="${COSIGN_KEY:?set COSIGN_KEY to the cosign private key path}"
 pub="${COSIGN_PUBLIC_KEY:-${key%.key}.pub}"
 [[ -f "$key" ]] || { echo "cosign key not found: $key" >&2; exit 1; }
 [[ -f "$pub" ]] || { echo "cosign public key not found: $pub" >&2; exit 1; }
+image_tag="v$version"
+image_ref="$registry:$image_tag"
 
 tools="$ROOT/release/tools.lock.toml"
 tool_image() {
@@ -77,14 +79,57 @@ fi
 
 workdir="$(mktemp -d -t clypeus-release-XXXXXX)"
 layout="$workdir/layout"
-trap 'rm -rf "$workdir"' EXIT
+tar="$workdir/image.tar"
+container=""
+trap '[[ -n "$container" ]] && docker rm -f "$container" >/dev/null 2>&1 || true; rm -rf "$workdir"' EXIT
 
-echo "==> build $registry:$version"
+echo "==> build $image_ref"
 docker buildx build "${builder_args[@]}" \
     --file "$ROOT/release/Dockerfile" \
     --platform linux/amd64 \
     --provenance=false \
-    --tag "$registry:$version" \
+    --tag "$image_ref" \
+    --output "type=docker,dest=$tar" \
+    "$ROOT"
+docker load --input "$tar" >/dev/null
+
+echo "==> smoke test"
+container="$(docker run -d -p 127.0.0.1::8080 \
+    -e CLYPEUS_STORE=memory \
+    -e CLYPEUS_STATIC_TOKEN=release-smoke \
+    -e CLYPEUS_STATIC_SCOPE=smoke \
+    -e CLYPEUS_STATIC_SUBJECT=release \
+    -e CLYPEUS_STATIC_SCOPES=admin \
+    -e CLYPEUS_SECRET_DIR=/tmp/clypeus-secrets \
+    "$image_ref")"
+port="$(docker port "$container" 8080 | head -1 | awk -F: '{print $NF}')"
+healthy=0
+for _ in $(seq 1 30); do
+    if curl -sf --max-time 2 "http://127.0.0.1:$port/healthz" >/dev/null; then
+        healthy=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$healthy" != "1" ]]; then
+    docker logs "$container" >&2 || true
+    echo "release image failed its smoke test" >&2
+    exit 1
+fi
+curl -sf --max-time 5 "http://127.0.0.1:$port/readyz" >/dev/null || {
+    echo "readiness probe failed" >&2
+    exit 1
+}
+docker rm -f "$container" >/dev/null
+container=""
+echo "    /healthz and /readyz ok"
+
+echo "==> build OCI layout"
+docker buildx build "${builder_args[@]}" \
+    --file "$ROOT/release/Dockerfile" \
+    --platform linux/amd64 \
+    --provenance=false \
+    --tag "$image_ref" \
     --output "type=oci,dest=$layout,tar=false" \
     "$ROOT"
 
@@ -99,9 +144,9 @@ docker run --rm \
 echo "==> push (oras $oras_image)"
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
     -v "$layout:/layout:ro" \
-    "$oras_image" cp --from-oci-layout "/layout:$version" "$registry:$version"
+    "$oras_image" cp --from-oci-layout "/layout:$image_tag" "$image_ref"
 digest="$(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
-    "$oras_image" manifest fetch --descriptor "$registry:$version" \
+    "$oras_image" manifest fetch --descriptor "$image_ref" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
 image="$registry@$digest"
 echo "    digest $digest"
@@ -144,6 +189,6 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mo
 
 cp "$sbom" "${CLYPEUS_RELEASE_SBOM:-/tmp}/clypeus-v$version.cdx.json" 2>/dev/null || true
 
-echo "release $registry:$version"
+echo "release $image_ref"
 echo "digest  $digest"
 echo "sbom    ${CLYPEUS_RELEASE_SBOM:-/tmp}/clypeus-v$version.cdx.json"

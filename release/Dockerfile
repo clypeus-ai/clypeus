@@ -6,7 +6,10 @@ COPY crates ./crates
 RUN cargo build --release -p clypeus-server --bin clypeus
 
 FROM debian:bookworm-slim AS runtime
-RUN useradd --system --uid 10001 --home /var/lib/clypeus clypeus \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --home /var/lib/clypeus clypeus \
     && mkdir -p /var/lib/clypeus/secrets \
     && chown -R clypeus:clypeus /var/lib/clypeus
 COPY --from=builder /src/target/release/clypeus /usr/local/bin/clypeus
