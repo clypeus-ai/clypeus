@@ -271,6 +271,22 @@ impl SqlStore {
         dialect: SqlDialect,
         migrator: &sqlx::migrate::Migrator,
     ) -> Result<Self, StoreError> {
+        Self::open(url, dialect, Some(migrator)).await
+    }
+
+    /// Connects to a schema the embedder owns and migrates itself. No DDL is
+    /// executed: the caller is responsible for the complete `clypeus_*` schema
+    /// (for example through its own migration tool), which also keeps a
+    /// least-privilege runtime role without schema `CREATE` working.
+    pub async fn connect_existing(url: &str, dialect: SqlDialect) -> Result<Self, StoreError> {
+        Self::open(url, dialect, None).await
+    }
+
+    async fn open(
+        url: &str,
+        dialect: SqlDialect,
+        migrator: Option<&sqlx::migrate::Migrator>,
+    ) -> Result<Self, StoreError> {
         install_default_drivers();
         // SQLite connections each see their own in-memory database unless the
         // URL uses a shared cache, and file databases serialize writers
@@ -281,10 +297,12 @@ impl SqlStore {
             .connect(url)
             .await
             .map_err(backend)?;
-        migrator.run(&pool).await.map_err(|error| {
-            tracing::error!(%error, "store migration failed");
-            StoreError::Backend(format!("migration failed: {error}"))
-        })?;
+        if let Some(migrator) = migrator {
+            migrator.run(&pool).await.map_err(|error| {
+                tracing::error!(%error, "store migration failed");
+                StoreError::Backend(format!("migration failed: {error}"))
+            })?;
+        }
         Ok(Self { pool, dialect })
     }
 

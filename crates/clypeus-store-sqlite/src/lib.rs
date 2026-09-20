@@ -13,3 +13,9 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 pub async fn connect(url: &str) -> Result<SqlStore, StoreError> {
     SqlStore::connect(url, SqlDialect::Sqlite, &MIGRATOR).await
 }
+
+/// Connects to SQLite without executing DDL. The embedder owns the complete
+/// `clypeus_*` schema through its own migration tool.
+pub async fn connect_existing(url: &str) -> Result<SqlStore, StoreError> {
+    SqlStore::connect_existing(url, SqlDialect::Sqlite).await
+}
