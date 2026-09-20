@@ -9,6 +9,7 @@
 #   COSIGN_PASSWORD           required by cosign when the key is encrypted
 #   CLYPEUS_RELEASE_CA        optional; CA bundle for a registry with a private CA
 #   CLYPEUS_RELEASE_ADD_HOST  optional; docker --add-host value for the registry host
+#   CLYPEUS_RELEASE_HOST_NETWORK  optional; "1" runs the push/sign tools on the host network
 #   CLYPEUS_RELEASE_BUILDER   optional; buildx builder name
 #   CLYPEUS_RELEASE_SKIP_TLOG optional; "false" uploads to the Rekor transparency log
 #
@@ -54,6 +55,9 @@ fi
 
 mounts=()
 run_mounts=()
+if [[ "${CLYPEUS_RELEASE_HOST_NETWORK:-0}" == "1" ]]; then
+    mounts+=(--network host)
+fi
 if [[ -n "${CLYPEUS_RELEASE_ADD_HOST:-}" ]]; then
     mounts+=(--add-host "$CLYPEUS_RELEASE_ADD_HOST")
 fi
