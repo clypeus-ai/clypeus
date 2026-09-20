@@ -20,9 +20,9 @@ Add the crates you need and pin an exact tag:
 
 ```toml
 [dependencies]
-clypeus-core = { git = "https://github.com/vitkuz573/clypeus", tag = "v1.0.0" }
-clypeus-provider-openai = { git = "https://github.com/vitkuz573/clypeus", tag = "v1.0.0" }
-clypeus-store-postgres = { git = "https://github.com/vitkuz573/clypeus", tag = "v1.0.0" }
+clypeus-core = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
+clypeus-provider-openai = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
+clypeus-store-postgres = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
 ```
 
 The composition root is small by design:

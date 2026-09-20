@@ -101,7 +101,7 @@ Consumers depend on the repository by tag and commit the resolved revision in
 `Cargo.lock`:
 
 ```toml
-clypeus-core = { git = "https://github.com/vitkuz573/clypeus", tag = "v1.0.0" }
+clypeus-core = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
 ```
 
 A consumer's release gate should fail when the tag resolves to a different
