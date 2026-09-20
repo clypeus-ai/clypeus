@@ -66,29 +66,39 @@ if [[ -n "${CLYPEUS_RELEASE_BUILDER:-}" ]]; then
     builder_args+=(--builder "$CLYPEUS_RELEASE_BUILDER")
 fi
 
-echo "==> build and push $registry:$version"
+workdir="$(mktemp -d -t clypeus-release-XXXXXX)"
+tar="$workdir/image.tar"
+trap 'rm -rf "$workdir"' EXIT
+
+echo "==> build $registry:$version"
 docker buildx build "${builder_args[@]}" \
     --file "$ROOT/release/Dockerfile" \
     --platform linux/amd64 \
     --provenance=false \
-    --push \
     --tag "$registry:$version" \
-    --tag "$registry:latest" \
-    --metadata-file /tmp/clypeus-release-metadata.json \
+    --output "type=docker,dest=$tar" \
     "$ROOT"
-digest="$(python3 -c 'import json; print(json.load(open("/tmp/clypeus-release-metadata.json"))["containerimage.digest"])')"
+docker load --input "$tar" >/dev/null
+
+sbom="$workdir/clypeus.cdx.json"
+echo "==> SBOM (syft $syft_image)"
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -v "$tar:/image.tar:ro" \
+    -v "$workdir:/out" \
+    "$syft_image" "docker-archive:/image.tar" -o "cyclonedx-json=/out/clypeus.cdx.json"
+[[ -s "$sbom" ]] || { echo "syft produced no SBOM" >&2; exit 1; }
+
+echo "==> push"
+docker push "$registry:$version"
+docker tag "$registry:$version" "$registry:latest"
+docker push "$registry:latest"
+repo_digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$registry:$version")"
+digest="${repo_digest#*@}"
 image="$registry@$digest"
 echo "    digest $digest"
 
-sbom="$(mktemp -t clypeus-sbom-XXXXXX.cdx.json)"
-echo "==> SBOM (syft $syft_image)"
-docker run --rm "${mounts[@]}" "${run_mounts[@]}" \
-    -v "$sbom:/sbom.cdx.json" \
-    "$syft_image" "registry:$registry@$digest" -o cyclonedx-json=/sbom.cdx.json
-[[ -s "$sbom" ]] || { echo "syft produced no SBOM" >&2; exit 1; }
-
 echo "==> attach SBOM"
-docker run --rm "${mounts[@]}" "${run_mounts[@]}" \
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
     -v "$sbom:/sbom.cdx.json:ro" \
     -v "$key:/cosign.key:ro" \
     -e COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" \
@@ -101,16 +111,18 @@ if [[ "${CLYPEUS_RELEASE_SKIP_TLOG:-true}" == "false" ]]; then
     tlog_args=()
     verify_args=()
 fi
-docker run --rm "${mounts[@]}" "${run_mounts[@]}" \
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
     -v "$key:/cosign.key:ro" \
     -e COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" \
     "$cosign_image" sign --key /cosign.key --yes "${tlog_args[@]}" "$image"
 
 echo "==> verify"
-docker run --rm "${mounts[@]}" "${run_mounts[@]}" \
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp "${mounts[@]}" "${run_mounts[@]}" \
     -v "$pub:/cosign.pub:ro" \
     "$cosign_image" verify --key /cosign.pub "${verify_args[@]}" "$image" >/dev/null
 
+cp "$sbom" "${CLYPEUS_RELEASE_SBOM:-/tmp}/clypeus-v$version.cdx.json" 2>/dev/null || true
+
 echo "release $registry:$version"
 echo "digest  $digest"
-echo "sbom    $sbom"
+echo "sbom    ${CLYPEUS_RELEASE_SBOM:-/tmp}/clypeus-v$version.cdx.json"
