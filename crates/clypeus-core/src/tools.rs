@@ -243,7 +243,8 @@ pub struct ToolExecContext {
     pub request_id: String,
     pub deadline: Instant,
     pub egress: Arc<dyn ToolEgress>,
-    /// Domain fields supplied by the application.
+    /// Domain fields supplied by the application. The broker projects the
+    /// principal's attributes here as string values.
     pub metadata: Map<String, Value>,
 }
 

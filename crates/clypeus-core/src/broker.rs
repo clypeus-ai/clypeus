@@ -1097,6 +1097,16 @@ impl ToolBroker {
             }
         };
 
+        // Principal attributes are the application's domain channel: they are
+        // projected into the tool context as JSON metadata so tools can render
+        // application identifiers (tenant keys, roles) without the core
+        // interpreting them.
+        let metadata = caller
+            .principal
+            .attributes
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect();
         let context = ToolExecContext {
             scope: caller.scope().clone(),
             subject: caller.subject().to_string(),
@@ -1104,7 +1114,7 @@ impl ToolBroker {
             request_id: caller.request_id.clone(),
             deadline: caller.deadline(),
             egress,
-            metadata: serde_json::Map::new(),
+            metadata,
         };
 
         let outcome = match self
@@ -1879,6 +1889,99 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    struct MetadataReadTool {
+        seen: Arc<Mutex<Option<Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for MetadataReadTool {
+        fn name(&self) -> &'static str {
+            "demo_metadata"
+        }
+
+        fn description(&self) -> &'static str {
+            "returns no data but records the tool context metadata"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false})
+        }
+
+        fn output_schema(&self) -> Value {
+            json!({"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": false})
+        }
+
+        fn required_scopes(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn risk(&self) -> crate::tools::Risk {
+            crate::tools::Risk::Read
+        }
+
+        fn approval(&self) -> Approval {
+            Approval::Never
+        }
+
+        fn egress(&self) -> Egress {
+            Egress {
+                service: "demo",
+                method: "GET",
+                path_template: "/v1/metadata",
+            }
+        }
+
+        fn auth_mode(&self) -> EgressAuth {
+            EgressAuth::Passthrough
+        }
+
+        async fn execute(&self, _args: Value, ctx: ToolExecContext) -> Result<Value, ToolError> {
+            *self.seen.lock().unwrap() = Some(Value::Object(ctx.metadata));
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn principal_attributes_reach_the_tool_context_as_metadata() {
+        let seen = Arc::new(Mutex::new(None));
+        let registry = Arc::new(ToolRegistry::new().register(MetadataReadTool {
+            seen: Arc::clone(&seen),
+        }));
+        let broker = ToolBroker::new(
+            registry,
+            Arc::new(MemoryApprovals::default()),
+            Arc::new(MemoryAudit::default()),
+            reqwest::Client::new(),
+            vec![("demo".to_string(), "https://api.example.com".to_string())],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let principal =
+            Principal::new(ScopeId::new("scope-a"), "user-1").with_attribute("tenant_key", "acme");
+        let caller = Caller::new(
+            principal,
+            "req-1",
+            Uuid::nil(),
+            Uuid::nil(),
+            Arc::new(TurnToolBudget::new(8, 4096, Duration::from_secs(60))),
+        );
+        let outcome = broker
+            .execute(
+                &caller,
+                ToolCallRequest {
+                    id: "call-meta".into(),
+                    name: "demo_metadata".into(),
+                    arguments: json!({}),
+                },
+            )
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Succeeded { .. }));
+        let metadata = seen.lock().unwrap().clone().expect("tool context seen");
+        assert_eq!(metadata["tenant_key"], json!("acme"));
     }
 
     #[tokio::test]
