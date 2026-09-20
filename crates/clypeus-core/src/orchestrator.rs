@@ -206,7 +206,7 @@ impl Orchestrator {
     ) -> BoxStream<'static, Result<Bytes, io::Error>> {
         let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(16);
         tokio::spawn(async move {
-            let _guard = TurnGuard::arm(
+            let mut guard = TurnGuard::arm(
                 Arc::clone(&self.conversation),
                 request.caller.scope().clone(),
                 request.caller.subject().to_string(),
@@ -220,13 +220,17 @@ impl Orchestrator {
                 return;
             }
             let outcome = self.run_loop(&request, Some(&sender), None).await;
-            self.finish_streamed(
-                &sender,
-                request.assistant_message_id,
-                &request.caller,
-                outcome,
-            )
-            .await;
+            let persisted = self
+                .finish_streamed(
+                    &sender,
+                    request.assistant_message_id,
+                    &request.caller,
+                    outcome,
+                )
+                .await;
+            if persisted {
+                guard.disarm();
+            }
             let _ = sender.send(Ok(Bytes::from_static(sse::DONE_EVENT))).await;
         });
         channel_stream(receiver)
@@ -239,7 +243,7 @@ impl Orchestrator {
     ) -> BoxStream<'static, Result<Bytes, io::Error>> {
         let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(16);
         tokio::spawn(async move {
-            let _guard = TurnGuard::arm(
+            let mut guard = TurnGuard::arm(
                 Arc::clone(&self.conversation),
                 request.caller.scope().clone(),
                 request.caller.subject().to_string(),
@@ -253,8 +257,12 @@ impl Orchestrator {
                 return;
             }
             let outcome = self.run_resume(&request, Some(&sender)).await;
-            self.finish_resumed_streamed(&sender, &request, outcome)
+            let persisted = self
+                .finish_resumed_streamed(&sender, &request, outcome)
                 .await;
+            if persisted {
+                guard.disarm();
+            }
             let _ = sender.send(Ok(Bytes::from_static(sse::DONE_EVENT))).await;
         });
         channel_stream(receiver)
@@ -314,7 +322,7 @@ impl Orchestrator {
         assistant_message_id: Uuid,
         caller: &Caller,
         outcome: Result<TurnOutcome, ProviderError>,
-    ) {
+    ) -> bool {
         let (status, error_code, completion) = match outcome {
             Ok(TurnOutcome::Completed(completion)) => (MessageStatus::Complete, None, completion),
             Ok(TurnOutcome::AwaitingApproval { completion, .. }) => {
@@ -336,14 +344,15 @@ impl Orchestrator {
                 )
             }
         };
-        self.finalize(
-            caller,
-            assistant_message_id,
-            &completion,
-            status,
-            error_code,
-        )
-        .await;
+        let persisted = self
+            .finalize(
+                caller,
+                assistant_message_id,
+                &completion,
+                status,
+                error_code,
+            )
+            .await;
         match status {
             MessageStatus::Complete => {
                 if let Some((thread, message)) = self.load_turn(caller, assistant_message_id).await
@@ -366,6 +375,7 @@ impl Orchestrator {
             }
             _ => {}
         }
+        persisted
     }
 
     async fn load_turn(
@@ -391,7 +401,7 @@ impl Orchestrator {
         sender: &Sender,
         request: &ResumeRequest,
         outcome: Result<TurnOutcome, ProviderError>,
-    ) {
+    ) -> bool {
         let (status, error_code) = match &outcome {
             Ok(TurnOutcome::Completed(_)) => (MessageStatus::Complete, None),
             Ok(TurnOutcome::AwaitingApproval { .. }) => (MessageStatus::AwaitingApproval, None),
@@ -408,14 +418,15 @@ impl Orchestrator {
                 usage: None,
             },
         };
-        self.finalize(
-            &request.caller,
-            request.assistant_message_id,
-            &completion,
-            status,
-            error_code,
-        )
-        .await;
+        let persisted = self
+            .finalize(
+                &request.caller,
+                request.assistant_message_id,
+                &completion,
+                status,
+                error_code,
+            )
+            .await;
         match status {
             MessageStatus::Complete => {
                 if let Some((thread, message)) = self
@@ -444,6 +455,7 @@ impl Orchestrator {
             }
             _ => {}
         }
+        persisted
     }
 
     async fn finalize(
@@ -453,7 +465,7 @@ impl Orchestrator {
         completion: &TurnCompletion,
         status: MessageStatus,
         error_detail: Option<&str>,
-    ) {
+    ) -> bool {
         let finish = AssistantFinish {
             scope: caller.scope(),
             subject: caller.subject(),
@@ -464,8 +476,12 @@ impl Orchestrator {
             status,
             error_detail,
         };
-        if let Err(error) = self.conversation.finalize_assistant(finish).await {
-            tracing::warn!(%error, message_id = %message_id, "assistant state was not persisted");
+        match self.conversation.finalize_assistant(finish).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, message_id = %message_id, "assistant state was not persisted");
+                false
+            }
         }
     }
 
@@ -943,6 +959,12 @@ impl TurnGuard {
             message_id,
             armed: true,
         }
+    }
+
+    /// Marks a terminal state as persisted, so dropping the guard no longer
+    /// rewrites the message as an abandoned turn.
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
@@ -1522,6 +1544,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(message.status, MessageStatus::Complete);
+        assert_eq!(message.content, "done");
+    }
+
+    #[tokio::test]
+    async fn streamed_turn_is_not_overwritten_by_the_turn_guard() {
+        use futures_util::StreamExt;
+
+        let provider = Arc::new(ScriptedProvider {
+            rounds: Mutex::new(Vec::new()),
+        });
+        let store = Arc::new(MemoryStore::default());
+        let orchestrator = Arc::new(orchestrator(provider, Arc::clone(&store)));
+        let thread = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let assistant = Uuid::new_v4();
+        store.insert_assistant(thread, user, assistant);
+
+        let request = TurnRequest {
+            provider_kind: ProviderKind::Openai,
+            provider: ProviderConfig::new("https://example.com", "key"),
+            model: "test".into(),
+            reasoning: None,
+            messages: vec![ChatMessage::text(ChatRole::User, "hi")],
+            tools: Vec::new(),
+            caller: Caller::new(
+                crate::principal::Principal::new(ScopeId::new("s"), "u"),
+                "req",
+                thread,
+                assistant,
+                budget_for(TurnLimits::default()),
+            ),
+            user_message_id: user,
+            assistant_message_id: assistant,
+            context: TurnContext::empty(),
+            limits: TurnLimits::default(),
+        };
+
+        let mut stream = Arc::clone(&orchestrator).spawn_streamed(request);
+        while let Some(item) = stream.next().await {
+            assert!(item.is_ok());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        let message = store
+            .message(&ScopeId::new("s"), "u", assistant)
+            .await
+            .unwrap();
+        assert_eq!(message.status, MessageStatus::Complete);
+        assert_eq!(message.error_detail, None);
         assert_eq!(message.content, "done");
     }
 
