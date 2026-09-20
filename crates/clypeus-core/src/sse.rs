@@ -107,10 +107,10 @@ pub fn tool_result(
 }
 
 /// Terminal persisted turn view.
-pub fn turn_completed(thread: &Thread, user_message_id: uuid::Uuid, assistant: &Message) -> String {
+pub fn turn_completed(thread: &Thread, user_message: &Message, assistant: &Message) -> String {
     let payload = json!({
         "thread": thread,
-        "userMessageId": user_message_id,
+        "userMessage": user_message,
         "assistant": assistant,
     });
     event("turn_completed", &payload)

@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use clypeus_core::audit::AuditQuery;
 use clypeus_core::broker::{ApprovalGrant, Caller, ToolCallRequest};
-use clypeus_core::context::TurnContext;
+use clypeus_core::context::{TurnContext, TurnContextInput};
 use clypeus_core::functions::RunFunctionRequest;
 use clypeus_core::models::{ChatMessage, ChatRole, ProviderKind, ReasoningLevel, ToolSpec};
 use clypeus_core::orchestrator::{
@@ -577,9 +577,25 @@ async fn run_turn(
     .map_err(|error| ApiError::bad_request(error.code, error.detail))?;
     let reasoning = reasoning.and_then(|level| ReasoningLevel::parse(&level));
 
-    let context = turn_context(plan.page_context.clone());
+    let context = state
+        .context_provider
+        .build(
+            &principal,
+            &TurnContextInput {
+                thread_id,
+                page_context: plan.page_context.clone(),
+            },
+        )
+        .await;
+    // An empty provider result falls back to the raw request hints; a
+    // configured provider owns the whole context document.
+    let context = if context.is_empty() {
+        turn_context(plan.page_context.clone())
+    } else {
+        context
+    };
     let context_json = serde_json::to_value(&context).ok();
-    let profile_prompt = profile_prompt(&settings.profile);
+    let profile_prompt = profile_prompt(state.prompt_profile.as_deref(), &settings.profile);
     let system = clypeus_core::context::build_system_message(profile_prompt.as_deref(), &context);
 
     let started = state
@@ -682,15 +698,22 @@ fn turn_context(page_context: Option<Value>) -> TurnContext {
     }
 }
 
-/// Renders the configured profile selection. The standalone server ships no
-/// built-in domain profile, so `Builtin` contributes only custom text.
-fn profile_prompt(selection: &ProfileSelection) -> Option<String> {
+/// Renders the configured profile selection. When an embedding application
+/// registered a [`PromptProfile`](clypeus_core::profile::PromptProfile),
+/// `Builtin` renders it with the operator's custom text appended.
+fn profile_prompt(
+    profile: Option<&dyn clypeus_core::profile::PromptProfile>,
+    selection: &ProfileSelection,
+) -> Option<String> {
     match selection {
-        ProfileSelection::Builtin { custom } => custom
-            .as_deref()
-            .map(str::trim)
-            .filter(|custom| !custom.is_empty())
-            .map(str::to_string),
+        ProfileSelection::Builtin { custom } => match profile {
+            Some(profile) => profile.build(custom.as_deref()),
+            None => custom
+                .as_deref()
+                .map(str::trim)
+                .filter(|custom| !custom.is_empty())
+                .map(str::to_string),
+        },
         ProfileSelection::Custom(prompt) => {
             let prompt = prompt.trim();
             (!prompt.is_empty()).then(|| prompt.to_string())

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clypeus_core::audit::{AuditReader, AuditSink};
 use clypeus_core::broker::ToolBroker;
+use clypeus_core::context::{EmptyTurnContextProvider, TurnContextProvider};
 use clypeus_core::functions::FunctionRunner;
 use clypeus_core::guard::{GuardPolicy, NeutralGuardPolicy};
 use clypeus_core::models::ProviderKind;
@@ -12,6 +13,7 @@ use clypeus_core::orchestrator::{Orchestrator, TurnLimits};
 use clypeus_core::principal::{
     PolicyEngine, PrincipalResolver, ResolverChain, StaticPolicy, StaticTokenResolver,
 };
+use clypeus_core::profile::PromptProfile;
 use clypeus_core::provider::ProviderRegistry;
 use clypeus_core::rate_limit::{InMemoryRateLimiter, RateLimitConfig, RateLimiter};
 use clypeus_core::secrets::SecretStore;
@@ -44,6 +46,10 @@ pub struct AppState {
     pub functions: Arc<clypeus_core::functions::FunctionRegistry>,
     pub chat_limiter: Arc<dyn RateLimiter>,
     pub guard: Arc<dyn GuardPolicy>,
+    /// Built-in prompt profile; `None` means `ProfileSelection::Builtin`
+    /// contributes only its custom text.
+    pub prompt_profile: Option<Arc<dyn PromptProfile>>,
+    pub context_provider: Arc<dyn TurnContextProvider>,
     pub metrics: metrics_exporter_prometheus::PrometheusHandle,
 }
 
@@ -238,6 +244,8 @@ impl AppState {
             functions,
             chat_limiter,
             guard,
+            prompt_profile: None,
+            context_provider: Arc::new(EmptyTurnContextProvider),
             metrics,
         });
 

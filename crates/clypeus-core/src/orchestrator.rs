@@ -348,12 +348,15 @@ impl Orchestrator {
             MessageStatus::Complete => {
                 if let Some((thread, message)) = self.load_turn(caller, assistant_message_id).await
                 {
-                    let payload = sse::turn_completed(
-                        &thread,
-                        message.parent_message_id.unwrap_or(message.id),
-                        &message,
-                    );
-                    let _ = sender.send(Ok(Bytes::from(payload))).await;
+                    let user_id = message.parent_message_id.unwrap_or(message.id);
+                    if let Ok(user_message) = self
+                        .conversation
+                        .message(caller.scope(), caller.subject(), user_id)
+                        .await
+                    {
+                        let payload = sse::turn_completed(&thread, &user_message, &message);
+                        let _ = sender.send(Ok(Bytes::from(payload))).await;
+                    }
                 }
             }
             MessageStatus::Error => {
@@ -419,8 +422,19 @@ impl Orchestrator {
                     .load_turn(&request.caller, request.assistant_message_id)
                     .await
                 {
-                    let payload = sse::turn_completed(&thread, request.user_message_id, &message);
-                    let _ = sender.send(Ok(Bytes::from(payload))).await;
+                    let user_id = if request.user_message_id.is_nil() {
+                        message.parent_message_id.unwrap_or(message.id)
+                    } else {
+                        request.user_message_id
+                    };
+                    if let Ok(user_message) = self
+                        .conversation
+                        .message(request.caller.scope(), request.caller.subject(), user_id)
+                        .await
+                    {
+                        let payload = sse::turn_completed(&thread, &user_message, &message);
+                        let _ = sender.send(Ok(Bytes::from(payload))).await;
+                    }
                 }
             }
             MessageStatus::Error => {
