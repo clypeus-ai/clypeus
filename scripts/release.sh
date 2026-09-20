@@ -82,7 +82,7 @@ docker load --input "$tar" >/dev/null
 
 sbom="$workdir/clypeus.cdx.json"
 echo "==> SBOM (syft $syft_image)"
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+docker run --rm \
     -v "$tar:/image.tar:ro" \
     -v "$workdir:/out" \
     "$syft_image" "docker-archive:/image.tar" -o "cyclonedx-json=/out/clypeus.cdx.json"
