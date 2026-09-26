@@ -28,7 +28,9 @@ One turn is a bounded loop:
 4. Tool results are projected, redacted, wrapped as untrusted data, and fed
    back to the provider.
 5. The loop stops on the first answer that requests no tools, on the turn
-   budget, or on a parked approval.
+   budget, on a parked approval, or on a stop (explicit `POST
+   /v1/messages/{id}/stop` or a dropped stream consumer). A stopped turn is
+   terminal: partial content, reasoning, and usage are persisted as streamed.
 
 Budgets: 4 tool rounds, 8 tool calls, 64 KiB of projected result bytes, and a
 90-second turn budget by default (`CLYPEUS_*` overrides).

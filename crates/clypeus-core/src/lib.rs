@@ -55,8 +55,8 @@ pub use functions::{
 pub use guard::{GuardHit, GuardPolicy, NeutralGuardPolicy, classify, classify_neutral};
 pub use models::{ChatMessage, ChatRole, ProviderKind, TokenUsage, ToolCall, ToolSpec};
 pub use orchestrator::{
-    Orchestrator, ResumeAction, ResumeProvider, ResumeRequest, TurnCompletion, TurnLimits,
-    TurnOutcome, TurnRequest, budget_for,
+    Orchestrator, ResumeAction, ResumeProvider, ResumeRequest, StopHandle, StopReason,
+    TurnCompletion, TurnLimits, TurnOutcome, TurnRequest, budget_for,
 };
 pub use principal::{
     AllowAllPolicy, AuthError, AuthRequest, Decision, PolicyEngine, Principal, PrincipalResolver,

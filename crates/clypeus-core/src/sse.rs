@@ -1,17 +1,21 @@
 //! Server-sent event contract.
 //!
-//! A turn stream closes with a terminal `turn_completed` event followed by
-//! exactly one `data: [DONE]` sentinel. Text and reasoning flow as anonymous
-//! `data:` chunks so any SSE client can render them; structured events use
-//! named events:
+//! A turn stream opens with a `turn_started` identity event, then closes with
+//! a terminal `turn_completed` event followed by exactly one `data: [DONE]`
+//! sentinel. Text and reasoning flow as anonymous `data:` chunks so any SSE
+//! client can render them; structured events use named events:
 //!
+//! * `turn_started` — thread, user message, and assistant message ids, emitted
+//!   first so a client can address `POST /v1/messages/{id}/stop`.
 //! * `context` — the turn context snapshot, emitted before the first byte.
 //! * `tool_call` — the model requested a tool call (`running` or
 //!   `waiting_approval`).
 //! * `tool_result` — the call finished, was denied, or expired.
-//! * `turn_completed` — the persisted turn view.
+//! * `turn_completed` — the persisted turn view; the assistant `status`
+//!   distinguishes `complete` from `stopped`.
 
 use serde_json::{Map, Value, json};
+use uuid::Uuid;
 
 use crate::context::TurnContext;
 use crate::models::TokenUsage;
@@ -48,6 +52,18 @@ pub fn usage(usage: &TokenUsage) -> Option<String> {
     serde_json::to_value(usage)
         .ok()
         .map(|value| data(&json!({"usage": value})))
+}
+
+/// Turn identity, emitted before any provider work so a client can stop it.
+pub fn turn_started(thread_id: Uuid, user_message_id: Uuid, assistant_message_id: Uuid) -> String {
+    event(
+        "turn_started",
+        &json!({
+            "threadId": thread_id,
+            "userMessageId": user_message_id,
+            "assistantMessageId": assistant_message_id,
+        }),
+    )
 }
 
 /// Turn context snapshot.

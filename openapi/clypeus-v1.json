@@ -2044,6 +2044,48 @@
         ]
       }
     },
+    "/v1/messages/{message_id}/stop": {
+      "post": {
+        "operationId": "stop_message",
+        "parameters": [
+          {
+            "description": "Assistant message id",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnResponse"
+                }
+              }
+            },
+            "description": "Stopped turn"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "tags": [
+          "Turns"
+        ]
+      }
+    },
     "/v1/models": {
       "get": {
         "operationId": "list_models",

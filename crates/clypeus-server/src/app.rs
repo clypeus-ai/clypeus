@@ -46,6 +46,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(handlers::activate_message),
         )
         .route(
+            "/v1/messages/{message_id}/stop",
+            post(handlers::stop_message),
+        )
+        .route(
             "/v1/messages/{message_id}/feedback",
             put(handlers::set_feedback).delete(handlers::clear_feedback),
         )

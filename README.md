@@ -74,14 +74,17 @@ with `clypeus --print-openapi`. Highlights:
 * `POST /v1/completions` — buffered or streamed completion.
 * `GET /v1/models`, `POST /v1/models/preview` — catalog and probe.
 * Threads, branched messages, feedback, usage: `/v1/threads`, `/v1/messages`.
+* Stop a running turn: `POST /v1/messages/{id}/stop` (idempotent; terminal
+  `stopped` status with partial output retained).
 * Approvals: `POST /v1/tool-calls/{id}/approvals`.
 * Tools and functions: `GET /v1/tools`, `GET|POST /v1/functions`.
 * Audit: `GET /v1/audit`, `GET /v1/audit/export`.
 * Administration: `/admin/v1/scopes/{scope}/settings`.
 * Operations: `/healthz`, `/readyz`, `/metrics`, `/openapi/v1.json`.
 
-The stream closes with a terminal `turn_completed` event followed by
-`data: [DONE]`.
+The stream opens with `turn_started` (thread and message ids) and closes with
+a terminal `turn_completed` event followed by `data: [DONE]`; an assistant
+message whose `status` is `stopped` was cancelled or disconnected mid-turn.
 
 ## Extension points
 

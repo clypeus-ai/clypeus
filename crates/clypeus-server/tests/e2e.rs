@@ -28,6 +28,11 @@ enum MockMode {
     EchoTool,
     ApprovalTool,
     TypedConfirmTool,
+    /// Streams reasoning, usage, and one partial text chunk, then stalls before
+    /// the rest of the answer.
+    SlowStream,
+    /// Rejects every completion with an upstream error.
+    Failing,
 }
 
 #[derive(Debug)]
@@ -72,6 +77,46 @@ async fn mock_models() -> Json<Value> {
     }))
 }
 
+/// A slow OpenAI-compatible SSE stream: reasoning, usage, and `partial ` arrive
+/// immediately, then the stream stalls before the rest of the answer so a test
+/// can stop or disconnect mid-round.
+fn slow_stream_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let chunks: Vec<(u64, String)> = vec![
+        (
+            0,
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking \"}}]}\n\n"
+                .to_string(),
+        ),
+        (
+            0,
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n"
+                .to_string(),
+        ),
+        (
+            0,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial \"}}]}\n\n".to_string(),
+        ),
+        (
+            5_000,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n".to_string(),
+        ),
+        (5_000, "data: [DONE]\n\n".to_string()),
+    ];
+    let stream = futures_util::stream::unfold(chunks.into_iter(), |mut chunks| async move {
+        let (delay_ms, chunk) = chunks.next()?;
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(chunk)), chunks))
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
 fn message_text(body: &Value, role: &str) -> String {
     body.get("messages")
         .and_then(Value::as_array)
@@ -109,6 +154,18 @@ async fn mock_chat(
         .is_some_and(|tools| !tools.is_empty());
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
+    if state.mode == MockMode::Failing {
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"message": "upstream exploded"}})),
+        )
+            .into_response();
+    }
+
+    if stream && state.mode == MockMode::SlowStream {
+        return slow_stream_response();
+    }
+
     if stream {
         let sse = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking \"}}]}\n\n",
@@ -141,7 +198,7 @@ async fn mock_chat(
                 "type": "function",
                 "function": {"name": "record_delete", "arguments": "{\"recordId\":\"rec-1\"}"}
             }),
-            MockMode::Plain => Value::Null,
+            MockMode::Plain | MockMode::SlowStream | MockMode::Failing => Value::Null,
         };
         if !call.is_null() {
             return Json(json!({
@@ -280,6 +337,71 @@ impl Harness {
             response.text().await
         );
         response.json().await.unwrap()
+    }
+
+    /// Opens a streamed turn and reads until the mock's partial content has
+    /// been delivered, returning the assistant message id from the opening
+    /// `turn_started` event.
+    async fn start_slow_stream(&self, thread: &str) -> (reqwest::Response, String, String) {
+        let mut response = self
+            .client
+            .post(self.url(&format!("/v1/threads/{thread}/messages")))
+            .bearer_auth(TOKEN)
+            .json(&json!({"content": "hello", "stream": true}))
+            .send()
+            .await
+            .expect("stream response");
+        assert_eq!(response.status(), 200);
+        let mut body = String::new();
+        let message_id = loop {
+            let chunk = response
+                .chunk()
+                .await
+                .expect("chunk read")
+                .expect("stream still open");
+            body.push_str(&String::from_utf8_lossy(&chunk));
+            if body.contains("partial ") {
+                break extract_assistant_id(&body).expect("turn_started carries the turn id");
+            }
+        };
+        (response, message_id, body)
+    }
+}
+
+fn extract_assistant_id(body: &str) -> Option<String> {
+    let marker = "\"assistantMessageId\":\"";
+    let start = body.find(marker)? + marker.len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Polls the thread view until the assistant turn reaches `expected`.
+async fn wait_for_status(
+    harness: &Harness,
+    thread: &str,
+    message_id: &str,
+    expected: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let response = harness.get(&format!("/v1/threads/{thread}")).await;
+        let view: Value = response.json().await.unwrap();
+        let message = view["messages"]
+            .as_array()
+            .expect("thread messages")
+            .iter()
+            .find(|message| message["id"] == message_id)
+            .cloned()
+            .unwrap_or(Value::Null);
+        if message["status"] == expected {
+            return message;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "turn {message_id} did not reach {expected}: {message}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -658,4 +780,140 @@ async fn admin_settings_and_model_catalog() {
     assert_eq!(updated.status(), 200);
     let updated: Value = updated.json().await.unwrap();
     assert_eq!(updated["timeoutMs"], 30000);
+}
+
+#[tokio::test]
+async fn stop_finalizes_a_running_turn_with_partial_output() {
+    let harness = harness(MockMode::SlowStream).await;
+    let thread = harness.create_thread().await;
+    let (response, message_id, seen) = harness.start_slow_stream(&thread).await;
+    assert!(seen.contains("event: turn_started"), "opening: {seen}");
+
+    let stopped = harness
+        .post(&format!("/v1/messages/{message_id}/stop"), json!({}))
+        .await;
+    assert_eq!(stopped.status(), 200);
+    let turn: Value = stopped.json().await.unwrap();
+    assert_eq!(turn["assistantMessage"]["id"], message_id);
+    assert_eq!(turn["assistantMessage"]["status"], "stopped");
+    assert_eq!(turn["assistantMessage"]["content"], "partial ");
+    assert_eq!(turn["assistantMessage"]["reasoningContent"], "thinking");
+    assert_eq!(turn["assistantMessage"]["usage"]["totalTokens"], 4);
+    assert!(turn["assistantMessage"]["errorDetail"].is_null());
+    assert_eq!(turn["userMessage"]["content"], "hello");
+
+    // The persisted state and the usage row carry the stopped status.
+    let message = wait_for_status(&harness, &thread, &message_id, "stopped").await;
+    assert_eq!(message["content"], "partial ");
+    let usage: Value = harness
+        .get(&format!("/v1/threads/{thread}/usage"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["total"]["totalTokens"], 4);
+    assert_eq!(usage["messages"][0]["status"], "stopped");
+    assert_eq!(usage["messages"][0]["usage"]["totalTokens"], 4);
+
+    // The consumer still connected to the stream sees the stopped view, not an
+    // error frame, and the stream closes.
+    let rest = response.text().await.unwrap();
+    assert!(rest.contains("event: turn_completed"), "rest: {rest}");
+    assert!(rest.contains("[DONE]"), "rest: {rest}");
+    assert!(!rest.contains("\"error\""), "rest: {rest}");
+}
+
+#[tokio::test]
+async fn stop_is_idempotent_and_unknown_turns_are_not_found() {
+    let harness = harness(MockMode::Plain).await;
+    let thread = harness.create_thread().await;
+    let turn = harness.send_message(&thread, "hello").await;
+    let message_id = turn["assistantMessage"]["id"].as_str().unwrap().to_string();
+
+    // Stopping a finished turn returns its current state unchanged.
+    let stopped = harness
+        .post(&format!("/v1/messages/{message_id}/stop"), json!({}))
+        .await;
+    assert_eq!(stopped.status(), 200);
+    let first: Value = stopped.json().await.unwrap();
+    assert_eq!(first["assistantMessage"]["status"], "complete");
+    assert_eq!(first["assistantMessage"]["content"], "final answer");
+
+    let again = harness
+        .post(&format!("/v1/messages/{message_id}/stop"), json!({}))
+        .await;
+    assert_eq!(again.status(), 200);
+    let second: Value = again.json().await.unwrap();
+    assert_eq!(second["assistantMessage"]["status"], "complete");
+    assert_eq!(second["assistantMessage"]["content"], "final answer");
+
+    // Unknown turn -> 404.
+    let unknown = harness
+        .post(
+            &format!("/v1/messages/{}/stop", uuid::Uuid::new_v4()),
+            json!({}),
+        )
+        .await;
+    assert_eq!(unknown.status(), 404);
+    let problem: Value = unknown.json().await.unwrap();
+    assert_eq!(problem["code"], "not_found");
+
+    // A user message is not a turn.
+    let user_id = turn["userMessage"]["id"].as_str().unwrap();
+    let user_stop = harness
+        .post(&format!("/v1/messages/{user_id}/stop"), json!({}))
+        .await;
+    assert_eq!(user_stop.status(), 404);
+}
+
+#[tokio::test]
+async fn client_disconnect_finalizes_the_turn_as_stopped() {
+    let harness = harness(MockMode::SlowStream).await;
+    let thread = harness.create_thread().await;
+    let (response, message_id, _) = harness.start_slow_stream(&thread).await;
+
+    // The consumer walks away without stopping.
+    drop(response);
+
+    let message = wait_for_status(&harness, &thread, &message_id, "stopped").await;
+    assert_eq!(message["status"], "stopped");
+    assert_eq!(message["errorDetail"], "client_disconnected");
+    assert!(
+        message["content"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("partial "),
+        "partial output must survive the disconnect: {message}"
+    );
+    assert_ne!(
+        message["errorDetail"], "provider_unreachable",
+        "a dropped consumer is not a provider failure"
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_still_finalizes_the_turn_as_error() {
+    let harness = harness(MockMode::Failing).await;
+    let thread = harness.create_thread().await;
+    let response = harness
+        .client
+        .post(harness.url(&format!("/v1/threads/{thread}/messages")))
+        .bearer_auth(TOKEN)
+        .json(&json!({"content": "hello", "stream": true}))
+        .send()
+        .await
+        .expect("stream response");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("provider_unavailable"),
+        "provider error reaches the client: {body}"
+    );
+    let message_id = extract_assistant_id(&body).expect("turn_started carries the turn id");
+    let message = wait_for_status(&harness, &thread, &message_id, "error").await;
+    assert_eq!(message["errorDetail"], "provider_unavailable");
+    assert_ne!(
+        message["status"], "stopped",
+        "a genuine provider failure is not a stop"
+    );
 }

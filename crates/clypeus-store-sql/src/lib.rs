@@ -1130,6 +1130,33 @@ impl ConversationStore for SqlStore {
         Ok(())
     }
 
+    async fn stop_turn(
+        &self,
+        scope: &ScopeId,
+        subject: &str,
+        message: Uuid,
+    ) -> Result<Message, StoreError> {
+        let now = Utc::now();
+        self.exec(
+            "UPDATE clypeus_messages SET status = 'stopped', updated_at = ?, completed_at = ?
+             WHERE id = ? AND scope_id = ? AND subject = ? AND role = 'assistant'
+               AND status IN ('pending', 'streaming', 'awaiting_approval')",
+            vec![
+                timestamp(now).into(),
+                timestamp(now).into(),
+                message.to_string().into(),
+                scope.to_string().into(),
+                subject.into(),
+            ],
+        )
+        .await?;
+        let message = self.load_message(scope, subject, message).await?;
+        if message.role != "assistant" {
+            return Err(StoreError::NotFound);
+        }
+        Ok(message)
+    }
+
     async fn finalize_stale_turns(
         &self,
         cutoff: DateTime<Utc>,

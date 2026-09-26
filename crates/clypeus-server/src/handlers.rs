@@ -547,6 +547,63 @@ pub async fn clear_feedback(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Upper bound on how long a stop waits for the owning stream task to persist
+/// the stopped state before finalizing from the persisted snapshot.
+const STOP_FINALIZE_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[utoipa::path(post, path = "/v1/messages/{message_id}/stop", tag = "Turns", params(("message_id" = Uuid, Path, description = "Assistant message id")), responses((status = 200, description = "Stopped turn", body = TurnResponse), (status = 404, description = "Not found", body = Problem)))]
+pub async fn stop_message(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+    Path(message_id): Path<Uuid>,
+) -> Result<Json<TurnResponse>, ApiError> {
+    let message = state
+        .conversation
+        .message(&principal.scope, &principal.subject, message_id)
+        .await?;
+    if message.role != "assistant" {
+        return Err(ApiError::not_found("not_found", "The turn was not found."));
+    }
+
+    // Ask the owning stream task to cancel; `None` means the turn is not
+    // running in this process (finished or abandoned).
+    if let Some(handle) = state.orchestrator.stop_turn(message_id) {
+        let _ = tokio::time::timeout(STOP_FINALIZE_TIMEOUT, handle.wait()).await;
+    }
+    // Cancelling a parked turn also refuses its pending tool decisions so a
+    // later approval cannot resume a stopped turn.
+    if message.status == MessageStatus::AwaitingApproval {
+        for call in &message.tool_calls {
+            if call.status == ToolCallStatus::AwaitingApproval {
+                let _ = state.approvals.mark_tool_call_denied(&call.id).await;
+            }
+        }
+    }
+    // Idempotent: terminal turns are returned unchanged; a running, parked, or
+    // abandoned one is finalized as stopped with its partial output intact.
+    let assistant = state
+        .conversation
+        .stop_turn(&principal.scope, &principal.subject, message_id)
+        .await?;
+
+    let user_id = assistant.parent_message_id.unwrap_or(assistant.id);
+    let user_message = state
+        .conversation
+        .message(&principal.scope, &principal.subject, user_id)
+        .await
+        .unwrap_or_else(|_| assistant.clone());
+    let thread = state
+        .conversation
+        .get_thread(&principal.scope, &principal.subject, message.thread_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("not_found", "The thread was not found."))?;
+    Ok(Json(TurnResponse {
+        thread: thread.into(),
+        user_message: user_message.into(),
+        assistant_message: assistant.into(),
+    }))
+}
+
 struct TurnPlan {
     target: StoreTurnTarget,
     content: String,

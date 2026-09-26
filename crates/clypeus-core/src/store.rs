@@ -93,7 +93,9 @@ pub trait ScopeSettingsStore: Send + Sync {
 // Conversation vocabulary
 // ---------------------------------------------------------------------------
 
-/// Lifecycle state of a chat message.
+/// Lifecycle state of a chat message. `Stopped` is the terminal state of a
+/// turn the caller cancelled or whose stream consumer disconnected before the
+/// provider finished; partial output is retained exactly as streamed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
@@ -101,6 +103,7 @@ pub enum MessageStatus {
     Streaming,
     AwaitingApproval,
     Complete,
+    Stopped,
     Error,
 }
 
@@ -111,6 +114,7 @@ impl MessageStatus {
             Self::Streaming => "streaming",
             Self::AwaitingApproval => "awaiting_approval",
             Self::Complete => "complete",
+            Self::Stopped => "stopped",
             Self::Error => "error",
         }
     }
@@ -121,6 +125,7 @@ impl MessageStatus {
             "streaming" => Some(Self::Streaming),
             "awaiting_approval" => Some(Self::AwaitingApproval),
             "complete" => Some(Self::Complete),
+            "stopped" => Some(Self::Stopped),
             "error" => Some(Self::Error),
             _ => None,
         }
@@ -426,6 +431,16 @@ pub trait ConversationStore: Send + Sync {
         request: BeginTurn,
     ) -> Result<StartedTurn, StoreError>;
     async fn finalize_assistant(&self, finish: AssistantFinish<'_>) -> Result<(), StoreError>;
+    /// Finalizes a `pending`/`streaming`/`awaiting_approval` assistant turn as
+    /// `stopped` without touching its content, reasoning, or usage. Returns the
+    /// persisted message; a turn that already reached a terminal state is
+    /// returned unchanged, so a repeated stop is a no-op.
+    async fn stop_turn(
+        &self,
+        scope: &ScopeId,
+        subject: &str,
+        message: Uuid,
+    ) -> Result<Message, StoreError>;
     /// Marks every message still `pending`/`streaming` older than `cutoff` as
     /// `error` with `code`.
     async fn finalize_stale_turns(

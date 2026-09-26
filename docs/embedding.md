@@ -48,9 +48,11 @@ The composition root is small by design:
    results are always wrapped as untrusted by the core.
 6. **Orchestration.** Build an `Orchestrator` from the provider registry,
    conversation store, broker, and `GuardPolicy`. `spawn_streamed` returns a
-   byte stream of the core SSE contract (`context`, `tool_call`,
-   `tool_result`, `turn_completed`, `[DONE]`); `run_buffered` returns a
-   `TurnOutcome` without streaming.
+   byte stream of the core SSE contract (`turn_started`, `context`,
+   `tool_call`, `tool_result`, `turn_completed`, `[DONE]`); `run_buffered`
+   returns a `TurnOutcome` without streaming. `Orchestrator::stop_turn`
+   cancels a streamed turn by its assistant message id and resolves once the
+   terminal `stopped` state is persisted.
 
 ```rust,ignore
 let orchestrator = Orchestrator::new(

@@ -29,6 +29,7 @@ use utoipa::OpenApi;
         crate::handlers::edit_message,
         crate::handlers::regenerate_message,
         crate::handlers::activate_message,
+        crate::handlers::stop_message,
         crate::handlers::set_feedback,
         crate::handlers::clear_feedback,
         crate::handlers::submit_approval,

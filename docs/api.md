@@ -28,8 +28,22 @@ admin scope.
 * `PATCH /v1/messages/{id}` — edit a user message (creates a sibling version).
 * `POST /v1/messages/{id}/regenerate` — regenerate an assistant message.
 * `POST /v1/messages/{id}/activate` — switch the active branch.
+* `POST /v1/messages/{id}/stop` — stop a running assistant turn. Returns the
+  persisted `TurnResponse`; stopping a turn that already finished returns its
+  current state unchanged (idempotent), an unknown or non-assistant message is
+  `404 not_found`.
 * `PUT|DELETE /v1/messages/{id}/feedback`
 * `GET /v1/threads/{id}/usage` — token usage across the thread.
+
+### Turn lifecycle
+
+Assistant messages carry a `status`: `pending`, `streaming`,
+`awaiting_approval`, `complete`, `stopped`, or `error`. `stopped` is terminal
+and is written when a turn is cancelled through the stop route or when the
+stream consumer disconnects without stopping; the content, reasoning, and
+usage produced before the stop are kept exactly as streamed, and the thread
+usage row reports `stopped`. A genuine provider failure is always `error` with
+the provider's code, never `stopped`.
 
 ### Reasoning levels
 
@@ -46,10 +60,13 @@ Text and reasoning stream as anonymous `data:` chunks
 (`{"delta":{"content"|"reasoning": "..."}}`), usage as
 `{"usage": {...}}`. Structured events:
 
-* `event: context` — the turn context snapshot, emitted first.
+* `event: turn_started` — `{ threadId, userMessageId, assistantMessageId }`,
+  emitted first so the consumer can stop the turn while it runs.
+* `event: context` — the turn context snapshot, emitted before the first byte.
 * `event: tool_call` — `{ id, name, arguments, risk, state, approval? }`.
 * `event: tool_result` — `{ id, name, state, result? , error?, durationMs }`.
-* `event: turn_completed` — the persisted turn view.
+* `event: turn_completed` — the persisted turn view; the assistant `status` is
+  `complete` or `stopped`.
 * `data: [DONE]` — terminal sentinel.
 
 ## Approvals

@@ -11,14 +11,15 @@
 //! the parked state, and the turn ends. An approval decision resumes the same
 //! assistant message.
 
+use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::broker::{
@@ -86,11 +87,30 @@ pub struct TurnRequest {
 }
 
 /// Final answer of a completed turn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TurnCompletion {
     pub content: String,
     pub reasoning: Option<String>,
     pub usage: Option<TokenUsage>,
+}
+
+/// Why a turn stopped before the provider finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// The caller asked the turn to stop through the API.
+    Requested,
+    /// The stream consumer dropped without asking the turn to stop.
+    ClientDisconnected,
+}
+
+impl StopReason {
+    /// `error_detail` persisted with the stopped turn, when there is one.
+    pub fn detail(self) -> Option<&'static str> {
+        match self {
+            Self::Requested => None,
+            Self::ClientDisconnected => Some("client_disconnected"),
+        }
+    }
 }
 
 /// How a turn stopped.
@@ -106,6 +126,12 @@ pub enum TurnOutcome {
     Failed {
         completion: TurnCompletion,
         code: &'static str,
+    },
+    /// The turn ended before the provider finished; partial content, reasoning,
+    /// and usage are retained exactly as they were produced.
+    Stopped {
+        completion: TurnCompletion,
+        reason: StopReason,
     },
 }
 
@@ -152,12 +178,134 @@ pub struct ResumeRequest {
     pub action: ResumeAction,
 }
 
+/// In-flight phase of one streamed turn. `Stopping` is set by
+/// [`Orchestrator::stop_turn`]; `Finished` is set after the owning task
+/// persisted the terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnPhase {
+    Running,
+    Stopping,
+    Finished,
+}
+
+/// Handle returned by [`Orchestrator::stop_turn`]. Awaiting it resolves when
+/// the owning task has persisted the terminal state (or is gone).
+#[derive(Debug, Clone)]
+pub struct StopHandle {
+    phase: watch::Receiver<TurnPhase>,
+}
+
+impl StopHandle {
+    /// Waits for the stopped turn to be persisted.
+    pub async fn wait(&self) {
+        let mut phase = self.phase.clone();
+        loop {
+            if matches!(*phase.borrow(), TurnPhase::Finished) {
+                return;
+            }
+            if phase.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Observer view of one turn's cancellation phase, held by the turn task.
+#[derive(Debug, Clone)]
+struct TurnWatch {
+    phase: watch::Receiver<TurnPhase>,
+}
+
+impl TurnWatch {
+    fn requested(&self) -> bool {
+        matches!(
+            *self.phase.borrow(),
+            TurnPhase::Stopping | TurnPhase::Finished
+        )
+    }
+
+    /// Resolves when a stop is requested. Stays pending when the turn ends
+    /// without one (the signal is dropped).
+    async fn stop_requested(&self) {
+        let mut phase = self.phase.clone();
+        loop {
+            if matches!(*phase.borrow(), TurnPhase::Stopping | TurnPhase::Finished) {
+                return;
+            }
+            if phase.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// Registers streamed turns so an explicit stop can cancel them.
+#[derive(Debug, Default)]
+struct TurnRegistry {
+    turns: Mutex<HashMap<Uuid, watch::Sender<TurnPhase>>>,
+}
+
+/// Owns the registry entry of one streamed turn; dropping it removes the
+/// entry and wakes every stop waiter even if the task panicked.
+#[derive(Debug)]
+struct TurnSlot {
+    registry: Arc<TurnRegistry>,
+    id: Uuid,
+    phase: watch::Sender<TurnPhase>,
+}
+
+impl TurnRegistry {
+    fn register(self: &Arc<Self>, id: Uuid) -> TurnSlot {
+        let (phase, _) = watch::channel(TurnPhase::Running);
+        self.lock().insert(id, phase.clone());
+        TurnSlot {
+            registry: Arc::clone(self),
+            id,
+            phase,
+        }
+    }
+
+    /// Requests a stop. `None` means no streamed turn owns the message; the
+    /// caller reads the persisted state to tell a finished turn from an
+    /// abandoned one.
+    fn stop(&self, id: Uuid) -> Option<StopHandle> {
+        let turns = self.lock();
+        let phase = turns.get(&id)?;
+        phase.send_replace(TurnPhase::Stopping);
+        Some(StopHandle {
+            phase: phase.subscribe(),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, watch::Sender<TurnPhase>>> {
+        self.turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl TurnSlot {
+    fn watch(&self) -> TurnWatch {
+        TurnWatch {
+            phase: self.phase.subscribe(),
+        }
+    }
+}
+
+impl Drop for TurnSlot {
+    fn drop(&mut self) {
+        self.registry.lock().remove(&self.id);
+        self.phase.send_replace(TurnPhase::Finished);
+    }
+}
+
 /// The tool loop, shared by buffered and streamed turns.
 pub struct Orchestrator {
     providers: Arc<ProviderRegistry>,
     conversation: Arc<dyn ConversationStore>,
     broker: Arc<ToolBroker>,
     guard: Arc<dyn GuardPolicy>,
+    turns: Arc<TurnRegistry>,
 }
 
 impl std::fmt::Debug for Orchestrator {
@@ -183,6 +331,7 @@ impl Orchestrator {
             conversation,
             broker,
             guard,
+            turns: Arc::new(TurnRegistry::default()),
         }
     }
 
@@ -190,36 +339,76 @@ impl Orchestrator {
         &self.broker
     }
 
+    /// Requests cancellation of the streamed turn owning `assistant_message_id`
+    /// and returns a handle that resolves once it persisted its terminal state.
+    ///
+    /// `None` means no streamed turn is in flight for that message: it either
+    /// finished or was abandoned. The caller decides from the persisted state
+    /// whether stopping is a no-op.
+    pub fn stop_turn(&self, assistant_message_id: Uuid) -> Option<StopHandle> {
+        self.turns.stop(assistant_message_id)
+    }
+
     pub async fn run_buffered(&self, request: TurnRequest) -> Result<TurnOutcome, ProviderError> {
-        let outcome = self.run_loop(&request, None, None).await;
+        let outcome = self.run_loop(&request, None, None, None).await;
         self.persist_outcome(&request.caller, request.assistant_message_id, &outcome)
             .await;
         outcome
     }
 
-    /// Drives a streamed turn. The returned stream starts with a `context`
-    /// event, carries `tool_call`/`tool_result` pairs, streams answer and
-    /// reasoning deltas, then closes with `turn_completed` and one `[DONE]`.
+    /// Drives a streamed turn. The returned stream opens with `turn_started`
+    /// and `context` events, carries `tool_call`/`tool_result` pairs, streams
+    /// answer and reasoning deltas, then closes with `turn_completed` and one
+    /// `[DONE]`. A dropped consumer finalizes the turn as `stopped`.
     pub fn spawn_streamed(
         self: Arc<Self>,
         request: TurnRequest,
     ) -> BoxStream<'static, Result<Bytes, io::Error>> {
         let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(16);
+        // Registered before the task starts so a stop addressed to the turn id
+        // always finds it once the id has been streamed.
+        let slot = self.turns.register(request.assistant_message_id);
         tokio::spawn(async move {
+            let watch = slot.watch();
             let mut guard = TurnGuard::arm(
                 Arc::clone(&self.conversation),
                 request.caller.scope().clone(),
                 request.caller.subject().to_string(),
                 request.assistant_message_id,
             );
-            if sender
-                .send(Ok(Bytes::from(sse::context(&request.context))))
+            let opened = sender
+                .send(Ok(Bytes::from(sse::turn_started(
+                    request.caller.thread_id,
+                    request.user_message_id,
+                    request.assistant_message_id,
+                ))))
                 .await
-                .is_err()
-            {
+                .is_ok()
+                && sender
+                    .send(Ok(Bytes::from(sse::context(&request.context))))
+                    .await
+                    .is_ok();
+            if !opened {
+                let stopped = TurnOutcome::Stopped {
+                    completion: TurnCompletion::default(),
+                    reason: StopReason::ClientDisconnected,
+                };
+                let persisted = self
+                    .finish_streamed(
+                        &sender,
+                        request.assistant_message_id,
+                        &request.caller,
+                        Ok(stopped),
+                    )
+                    .await;
+                if persisted {
+                    guard.disarm();
+                }
                 return;
             }
-            let outcome = self.run_loop(&request, Some(&sender), None).await;
+            let outcome = self
+                .run_loop(&request, Some(&sender), None, Some(watch))
+                .await;
             let persisted = self
                 .finish_streamed(
                     &sender,
@@ -242,21 +431,41 @@ impl Orchestrator {
         request: ResumeRequest,
     ) -> BoxStream<'static, Result<Bytes, io::Error>> {
         let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(16);
+        let slot = self.turns.register(request.assistant_message_id);
         tokio::spawn(async move {
+            let watch = slot.watch();
             let mut guard = TurnGuard::arm(
                 Arc::clone(&self.conversation),
                 request.caller.scope().clone(),
                 request.caller.subject().to_string(),
                 request.assistant_message_id,
             );
-            if sender
-                .send(Ok(Bytes::from(sse::context(&request.context))))
+            let opened = sender
+                .send(Ok(Bytes::from(sse::turn_started(
+                    request.caller.thread_id,
+                    request.user_message_id,
+                    request.assistant_message_id,
+                ))))
                 .await
-                .is_err()
-            {
+                .is_ok()
+                && sender
+                    .send(Ok(Bytes::from(sse::context(&request.context))))
+                    .await
+                    .is_ok();
+            if !opened {
+                let stopped = TurnOutcome::Stopped {
+                    completion: TurnCompletion::default(),
+                    reason: StopReason::ClientDisconnected,
+                };
+                let persisted = self
+                    .finish_resumed_streamed(&sender, &request, Ok(stopped))
+                    .await;
+                if persisted {
+                    guard.disarm();
+                }
                 return;
             }
-            let outcome = self.run_resume(&request, Some(&sender)).await;
+            let outcome = self.run_resume(&request, Some(&sender), Some(watch)).await;
             let persisted = self
                 .finish_resumed_streamed(&sender, &request, outcome)
                 .await;
@@ -273,7 +482,7 @@ impl Orchestrator {
         &self,
         request: ResumeRequest,
     ) -> Result<TurnOutcome, ProviderError> {
-        let outcome = self.run_resume(&request, None).await;
+        let outcome = self.run_resume(&request, None, None).await;
         self.persist_outcome(&request.caller, request.assistant_message_id, &outcome)
             .await;
         outcome
@@ -295,6 +504,9 @@ impl Orchestrator {
             }
             Ok(TurnOutcome::Failed { completion, code }) => {
                 (MessageStatus::Error, Some(*code), completion.clone())
+            }
+            Ok(TurnOutcome::Stopped { completion, reason }) => {
+                (MessageStatus::Stopped, reason.detail(), completion.clone())
             }
             Err(error) => (
                 MessageStatus::Error,
@@ -331,6 +543,9 @@ impl Orchestrator {
             Ok(TurnOutcome::Failed { completion, code }) => {
                 (MessageStatus::Error, Some(code), completion)
             }
+            Ok(TurnOutcome::Stopped { completion, reason }) => {
+                (MessageStatus::Stopped, reason.detail(), completion)
+            }
             Err(error) => {
                 tracing::warn!(detail = %error, "streamed assistant turn failed");
                 (
@@ -354,7 +569,7 @@ impl Orchestrator {
             )
             .await;
         match status {
-            MessageStatus::Complete => {
+            MessageStatus::Complete | MessageStatus::Stopped => {
                 if let Some((thread, message)) = self.load_turn(caller, assistant_message_id).await
                 {
                     let user_id = message.parent_message_id.unwrap_or(message.id);
@@ -406,12 +621,14 @@ impl Orchestrator {
             Ok(TurnOutcome::Completed(_)) => (MessageStatus::Complete, None),
             Ok(TurnOutcome::AwaitingApproval { .. }) => (MessageStatus::AwaitingApproval, None),
             Ok(TurnOutcome::Failed { code, .. }) => (MessageStatus::Error, Some(*code)),
+            Ok(TurnOutcome::Stopped { reason, .. }) => (MessageStatus::Stopped, reason.detail()),
             Err(error) => (MessageStatus::Error, Some(error.code())),
         };
         let completion = match outcome {
             Ok(TurnOutcome::Completed(completion))
             | Ok(TurnOutcome::AwaitingApproval { completion, .. })
-            | Ok(TurnOutcome::Failed { completion, .. }) => completion,
+            | Ok(TurnOutcome::Failed { completion, .. })
+            | Ok(TurnOutcome::Stopped { completion, .. }) => completion,
             Err(_) => TurnCompletion {
                 content: String::new(),
                 reasoning: None,
@@ -428,7 +645,7 @@ impl Orchestrator {
             )
             .await;
         match status {
-            MessageStatus::Complete => {
+            MessageStatus::Complete | MessageStatus::Stopped => {
                 if let Some((thread, message)) = self
                     .load_turn(&request.caller, request.assistant_message_id)
                     .await
@@ -489,11 +706,12 @@ impl Orchestrator {
         &self,
         request: &ResumeRequest,
         sender: Option<&Sender>,
+        watch: Option<TurnWatch>,
     ) -> Result<TurnOutcome, ProviderError> {
         let call = request.action.request();
         let risk = self.broker.tool_risk(&call.name).unwrap_or("write");
 
-        let prior_reasoning = self
+        let prior = self
             .conversation
             .message(
                 request.caller.scope(),
@@ -501,17 +719,37 @@ impl Orchestrator {
                 request.assistant_message_id,
             )
             .await
-            .ok()
-            .and_then(|message| message.reasoning_content)
+            .ok();
+        let prior_reasoning = prior
+            .as_ref()
+            .and_then(|message| message.reasoning_content.clone())
             .filter(|reasoning| !reasoning.is_empty());
+        // A stop or disconnect before the provider round resumes keeps the
+        // content and usage persisted when the turn parked.
+        let prior_completion = || TurnCompletion {
+            content: prior
+                .as_ref()
+                .map(|message| message.content.clone())
+                .unwrap_or_default(),
+            reasoning: prior_reasoning.clone(),
+            usage: prior.as_ref().and_then(|message| message.usage.clone()),
+        };
+
+        if is_stopping(&watch) {
+            return Ok(TurnOutcome::Stopped {
+                completion: prior_completion(),
+                reason: StopReason::Requested,
+            });
+        }
 
         if let Some(sender) = sender {
             let event =
                 sse::tool_call(&call.id, &call.name, &call.arguments, risk, "running", None);
             if sender.send(Ok(Bytes::from(event))).await.is_err() {
-                return Err(ProviderError::Transport(
-                    "client disconnected before tool execution".to_string(),
-                ));
+                return Ok(TurnOutcome::Stopped {
+                    completion: prior_completion(),
+                    reason: StopReason::ClientDisconnected,
+                });
             }
         }
 
@@ -533,9 +771,10 @@ impl Orchestrator {
         if let Some(sender) = sender {
             let event = tool_result_event(&call.id, &call.name, &outcome);
             if sender.send(Ok(Bytes::from(event))).await.is_err() {
-                return Err(ProviderError::Transport(
-                    "client disconnected before the tool result".to_string(),
-                ));
+                return Ok(TurnOutcome::Stopped {
+                    completion: prior_completion(),
+                    reason: StopReason::ClientDisconnected,
+                });
             }
         }
 
@@ -562,7 +801,7 @@ impl Orchestrator {
             context: request.context.clone(),
             limits: request.limits,
         };
-        self.run_loop(&turn, sender, prior_reasoning).await
+        self.run_loop(&turn, sender, prior_reasoning, watch).await
     }
 
     async fn run_loop(
@@ -570,6 +809,7 @@ impl Orchestrator {
         request: &TurnRequest,
         sender: Option<&Sender>,
         prior_reasoning: Option<String>,
+        mut watch: Option<TurnWatch>,
     ) -> Result<TurnOutcome, ProviderError> {
         let started = Instant::now();
         let deadline = tokio::time::Instant::now() + request.provider.timeout;
@@ -584,8 +824,15 @@ impl Orchestrator {
         if let Some(hit) = crate::guard::classify(self.guard.as_ref(), latest_user) {
             metrics::record_injection_blocked(hit.reason());
             let content = self.guard.refusal().to_string();
-            if let Some(sender) = sender {
-                send_content_delta(sender, &content).await?;
+            if let Some(sender) = sender
+                && !send_content_delta(sender, &content).await
+            {
+                return Ok(stopped_completion(
+                    content,
+                    String::new(),
+                    None,
+                    StopReason::ClientDisconnected,
+                ));
             }
             return Ok(TurnOutcome::Completed(TurnCompletion {
                 content,
@@ -596,11 +843,20 @@ impl Orchestrator {
 
         let mut messages = request.messages.clone();
         let mut usage: Option<TokenUsage> = None;
+        let mut content = String::new();
         let mut reasoning = prior_reasoning.unwrap_or_default();
         let mut rounds = 0usize;
         let mut offering = !request.tools.is_empty();
 
         loop {
+            if is_stopping(&watch) {
+                return Ok(stopped_completion(
+                    content,
+                    reasoning,
+                    usage,
+                    StopReason::Requested,
+                ));
+            }
             if started.elapsed() >= request.limits.turn_budget {
                 if offering {
                     offering = false;
@@ -625,29 +881,46 @@ impl Orchestrator {
                 },
                 max_output_tokens: request.provider.max_output_tokens,
             };
-            let outcome = match sender {
+            let round = match sender {
                 Some(sender) => tokio::time::timeout_at(
                     deadline,
-                    self.run_streamed_round(request, &completion_request, sender),
+                    self.run_streamed_round(request, &completion_request, sender, watch.as_mut()),
                 )
                 .await
                 .map_err(|_| ProviderError::Timeout)??,
-                None => tokio::time::timeout_at(
-                    deadline,
-                    self.complete_round(request, &completion_request),
-                )
-                .await
-                .map_err(|_| ProviderError::Timeout)??,
+                None => RoundOutcome::Complete(
+                    tokio::time::timeout_at(
+                        deadline,
+                        self.complete_round(request, &completion_request),
+                    )
+                    .await
+                    .map_err(|_| ProviderError::Timeout)??,
+                ),
+            };
+
+            let outcome = match round {
+                RoundOutcome::Complete(outcome) => outcome,
+                RoundOutcome::Interrupted { outcome, reason } => {
+                    merge_round(&mut content, &mut reasoning, &mut usage, &outcome);
+                    return Ok(stopped_completion(content, reasoning, usage, reason));
+                }
             };
 
             if let Some(round_usage) = outcome.usage.as_ref() {
                 usage
                     .get_or_insert_with(TokenUsage::default)
                     .accumulate(round_usage);
-                if let (Some(sender), Some(total)) = (sender, usage.as_ref())
+                if let Some(sender) = sender
+                    && let Some(total) = usage.as_ref()
                     && let Some(event) = sse::usage(total)
+                    && !send_raw(sender, event).await
                 {
-                    send_raw(sender, event).await?;
+                    return Ok(stopped_completion(
+                        content,
+                        reasoning,
+                        usage,
+                        StopReason::ClientDisconnected,
+                    ));
                 }
             }
 
@@ -662,6 +935,9 @@ impl Orchestrator {
                 }
                 reasoning.push_str(round_reasoning);
             }
+            // Keep every streamed text block so a later stop persists exactly
+            // what the consumer already saw, including pre-tool preamble.
+            content.push_str(&outcome.content);
 
             if outcome.tool_calls.is_empty() || !offering {
                 if outcome.content.trim().is_empty() {
@@ -696,6 +972,14 @@ impl Orchestrator {
 
             let mut index = 0usize;
             while index < outcome.tool_calls.len() {
+                if is_stopping(&watch) {
+                    return Ok(stopped_completion(
+                        content,
+                        reasoning,
+                        usage,
+                        StopReason::Requested,
+                    ));
+                }
                 let call = &outcome.tool_calls[index];
                 if self.broker.requires_approval(&call.name) {
                     index += 1;
@@ -738,8 +1022,11 @@ impl Orchestrator {
                             if let Some(sender) = sender {
                                 let event = tool_result_event(&call.id, &call.name, &tool_outcome);
                                 if sender.send(Ok(Bytes::from(event))).await.is_err() {
-                                    return Err(ProviderError::Transport(
-                                        "client disconnected before the tool result".to_string(),
+                                    return Ok(stopped_completion(
+                                        content,
+                                        reasoning,
+                                        usage,
+                                        StopReason::ClientDisconnected,
                                     ));
                                 }
                             }
@@ -777,21 +1064,35 @@ impl Orchestrator {
                             None,
                         );
                         if sender.send(Ok(Bytes::from(event))).await.is_err() {
-                            return Err(ProviderError::Transport(
-                                "client disconnected before tool execution".to_string(),
+                            return Ok(stopped_completion(
+                                content,
+                                reasoning,
+                                usage,
+                                StopReason::ClientDisconnected,
                             ));
                         }
                     }
                 }
 
                 let outcomes = self.execute_parallel(&request.caller, batch).await;
+                if is_stopping(&watch) {
+                    return Ok(stopped_completion(
+                        content,
+                        reasoning,
+                        usage,
+                        StopReason::Requested,
+                    ));
+                }
 
                 for (call, result) in batch.iter().zip(outcomes) {
                     if let Some(sender) = sender {
                         let event = tool_result_event(&call.id, &call.name, &result);
                         if sender.send(Ok(Bytes::from(event))).await.is_err() {
-                            return Err(ProviderError::Transport(
-                                "client disconnected before the tool result".to_string(),
+                            return Ok(stopped_completion(
+                                content,
+                                reasoning,
+                                usage,
+                                StopReason::ClientDisconnected,
                             ));
                         }
                     }
@@ -851,7 +1152,8 @@ impl Orchestrator {
         request: &TurnRequest,
         completion: &CompletionRequest,
         sender: &Sender,
-    ) -> Result<AssistantOutcome, ProviderError> {
+        watch: Option<&mut TurnWatch>,
+    ) -> Result<RoundOutcome, ProviderError> {
         let provider = self
             .providers
             .get(request.provider_kind)
@@ -860,21 +1162,113 @@ impl Orchestrator {
             .stream(&request.provider, completion.clone())
             .await?;
         metrics::record_provider_request(request.provider_kind.as_wire(), "succeeded");
-        while let Some(item) = stream.next().await {
-            for delta in item? {
-                let event = match delta {
-                    StreamDelta::Content(text) => sse::content_delta(&text),
-                    StreamDelta::Reasoning(text) => sse::reasoning_delta(&text),
-                };
-                if sender.send(Ok(Bytes::from(event))).await.is_err() {
-                    return Err(ProviderError::Transport(
-                        "client disconnected mid-round".to_string(),
-                    ));
+        // A stop request or a dropped consumer must interrupt the provider
+        // read itself, not be discovered only when the next delta is sent.
+        let sender_closed = sender.clone();
+        let mut interruption: Option<StopReason> = None;
+        loop {
+            let stop = async {
+                match watch.as_ref() {
+                    Some(watch) => watch.stop_requested().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                () = stop => {
+                    interruption = Some(StopReason::Requested);
+                    break;
+                }
+                _ = sender_closed.closed() => {
+                    interruption = Some(StopReason::ClientDisconnected);
+                    break;
+                }
+                item = stream.next() => {
+                    match item {
+                        Some(Ok(deltas)) => {
+                            for delta in deltas {
+                                let event = match delta {
+                                    StreamDelta::Content(text) => sse::content_delta(&text),
+                                    StreamDelta::Reasoning(text) => sse::reasoning_delta(&text),
+                                };
+                                if sender.send(Ok(Bytes::from(event))).await.is_err() {
+                                    interruption = Some(StopReason::ClientDisconnected);
+                                    break;
+                                }
+                            }
+                            if interruption.is_some() {
+                                break;
+                            }
+                        }
+                        Some(Err(error)) => return Err(error),
+                        None => break,
+                    }
                 }
             }
         }
-        Ok(stream.into_outcome())
+        let outcome = stream.into_outcome();
+        Ok(match interruption {
+            None => RoundOutcome::Complete(outcome),
+            Some(reason) => RoundOutcome::Interrupted { outcome, reason },
+        })
     }
+}
+
+/// Result of one streamed provider round.
+enum RoundOutcome {
+    Complete(AssistantOutcome),
+    Interrupted {
+        outcome: AssistantOutcome,
+        reason: StopReason,
+    },
+}
+
+/// Builds the terminal outcome of a turn interrupted before it finished.
+fn stopped_completion(
+    content: String,
+    reasoning: String,
+    usage: Option<TokenUsage>,
+    reason: StopReason,
+) -> TurnOutcome {
+    TurnOutcome::Stopped {
+        completion: TurnCompletion {
+            content,
+            reasoning: (!reasoning.is_empty()).then_some(reasoning),
+            usage,
+        },
+        reason,
+    }
+}
+
+/// Merges the partial output of an interrupted round into the turn
+/// accumulators.
+fn merge_round(
+    content: &mut String,
+    reasoning: &mut String,
+    usage: &mut Option<TokenUsage>,
+    outcome: &AssistantOutcome,
+) {
+    content.push_str(&outcome.content);
+    if let Some(round_usage) = outcome.usage.as_ref() {
+        usage
+            .get_or_insert_with(TokenUsage::default)
+            .accumulate(round_usage);
+    }
+    if let Some(round_reasoning) = outcome
+        .reasoning
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        if !reasoning.is_empty() {
+            reasoning.push('\n');
+        }
+        reasoning.push_str(round_reasoning);
+    }
+}
+
+fn is_stopping(watch: &Option<TurnWatch>) -> bool {
+    watch.as_ref().is_some_and(|watch| watch.requested())
 }
 
 fn channel_stream(
@@ -886,15 +1280,13 @@ fn channel_stream(
     ))
 }
 
-async fn send_content_delta(sender: &Sender, text: &str) -> Result<(), ProviderError> {
+async fn send_content_delta(sender: &Sender, text: &str) -> bool {
     send_raw(sender, sse::content_delta(text)).await
 }
 
-async fn send_raw(sender: &Sender, event: String) -> Result<(), ProviderError> {
-    sender
-        .send(Ok(Bytes::from(event)))
-        .await
-        .map_err(|_| ProviderError::Transport("client disconnected".to_string()))
+/// Sends one raw SSE frame; `false` means the consumer is gone.
+async fn send_raw(sender: &Sender, event: String) -> bool {
+    sender.send(Ok(Bytes::from(event))).await.is_ok()
 }
 
 /// The `role: tool` content handed back to the provider. Every payload is
@@ -936,7 +1328,8 @@ fn tool_result_event(id: &str, name: &str, outcome: &ToolCallOutcome) -> String 
 }
 
 /// Drop guard that finalizes an assistant message if the owning task ends
-/// without persisting a terminal state (client disconnect, panic, shutdown).
+/// without persisting a terminal state (panic or shutdown). A client
+/// disconnect is classified as a stop by the turn loop itself.
 struct TurnGuard {
     conversation: Arc<dyn ConversationStore>,
     scope: ScopeId,
@@ -1288,6 +1681,26 @@ mod tests {
             _code: &str,
         ) -> Result<usize, StoreError> {
             Ok(0)
+        }
+        async fn stop_turn(
+            &self,
+            _scope: &ScopeId,
+            _subject: &str,
+            message: Uuid,
+        ) -> Result<Message, StoreError> {
+            let mut messages = self.messages.lock().unwrap();
+            let row = messages.get_mut(&message).ok_or(StoreError::NotFound)?;
+            if row.role != "assistant" {
+                return Err(StoreError::NotFound);
+            }
+            if matches!(
+                row.status,
+                MessageStatus::Pending | MessageStatus::Streaming | MessageStatus::AwaitingApproval
+            ) {
+                row.status = MessageStatus::Stopped;
+                row.completed_at = Some(chrono::Utc::now());
+            }
+            Ok(row.clone())
         }
         async fn thread_view(
             &self,

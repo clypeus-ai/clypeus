@@ -543,6 +543,39 @@ impl ConversationStore for MemoryStore {
         Ok(())
     }
 
+    async fn stop_turn(
+        &self,
+        scope: &ScopeId,
+        subject: &str,
+        message: Uuid,
+    ) -> Result<Message, StoreError> {
+        let mut state = self.lock();
+        let (thread_id, role, status) = state
+            .messages
+            .get(&message)
+            .map(|row| (row.thread_id, row.role.clone(), row.status))
+            .ok_or(StoreError::NotFound)?;
+        let thread_matches = state
+            .threads
+            .get(&thread_id)
+            .is_some_and(|thread| thread.scope_id == scope.as_str() && thread.subject == subject);
+        if role != "assistant" || !thread_matches {
+            return Err(StoreError::NotFound);
+        }
+        if matches!(
+            status,
+            MessageStatus::Pending | MessageStatus::Streaming | MessageStatus::AwaitingApproval
+        ) {
+            let now = Utc::now();
+            if let Some(row) = state.messages.get_mut(&message) {
+                row.status = MessageStatus::Stopped;
+                row.updated_at = now;
+                row.completed_at = Some(now);
+            }
+        }
+        Self::message_in_scope(&state, scope, subject, message)
+    }
+
     async fn finalize_stale_turns(
         &self,
         cutoff: DateTime<Utc>,

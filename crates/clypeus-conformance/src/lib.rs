@@ -454,6 +454,124 @@ where
         "thread usage must accumulate assistant message usage"
     );
 
+    // A stopped turn is terminal, keeps its partial output and usage, and a
+    // second stop is a no-op.
+    let stopped = store
+        .begin_turn(
+            &scope,
+            subject,
+            BeginTurn {
+                thread_id: Some(thread.id),
+                target: TurnTarget::New,
+                content: "stop this".into(),
+                title: None,
+                model: None,
+                reasoning_level: None,
+                context_version: None,
+                context_json: None,
+            },
+        )
+        .await
+        .map_err(|error| backend("stopped_turn_begin", error))?;
+    store
+        .finalize_assistant(AssistantFinish {
+            scope: &scope,
+            subject,
+            message_id: stopped.assistant_message.id,
+            content: "partial answer",
+            reasoning: Some("partial reasoning"),
+            usage: Some(&TokenUsage {
+                prompt_tokens: Some(1),
+                completion_tokens: Some(2),
+                total_tokens: Some(3),
+                ..TokenUsage::default()
+            }),
+            status: MessageStatus::Stopped,
+            error_detail: Some("client_disconnected"),
+        })
+        .await
+        .map_err(|error| backend("stopped_turn_finalize", error))?;
+    let stopped_message = store
+        .message(&scope, subject, stopped.assistant_message.id)
+        .await
+        .map_err(|error| backend("stopped_turn_get", error))?;
+    expect!(
+        "stopped_turn_keeps_partial_output",
+        stopped_message.status == MessageStatus::Stopped
+            && stopped_message.content == "partial answer"
+            && stopped_message.reasoning_content.as_deref() == Some("partial reasoning")
+            && stopped_message
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.total_tokens)
+                == Some(3)
+            && stopped_message.completed_at.is_some(),
+        "a stopped turn must persist its partial output and usage"
+    );
+    let usage = store
+        .thread_usage(&scope, subject, thread.id)
+        .await
+        .map_err(|error| backend("usage_after_stop", error))?;
+    expect!(
+        "stopped_turn_usage_row",
+        usage.total.total_tokens == Some(18)
+            && usage
+                .messages
+                .iter()
+                .any(|entry| entry.message_id == stopped.assistant_message.id
+                    && entry.status == MessageStatus::Stopped
+                    && entry.usage.total_tokens == Some(3)),
+        "the usage row must expose the stopped status and partial usage"
+    );
+
+    // `stop_turn` finalizes a non-terminal turn and is idempotent afterwards.
+    let pending = store
+        .begin_turn(
+            &scope,
+            subject,
+            BeginTurn {
+                thread_id: Some(thread.id),
+                target: TurnTarget::New,
+                content: "cancel me".into(),
+                title: None,
+                model: None,
+                reasoning_level: None,
+                context_version: None,
+                context_json: None,
+            },
+        )
+        .await
+        .map_err(|error| backend("stop_turn_begin", error))?;
+    let stopped_by_op = store
+        .stop_turn(&scope, subject, pending.assistant_message.id)
+        .await
+        .map_err(|error| backend("stop_turn_op", error))?;
+    expect!(
+        "stop_turn_finalizes_non_terminal",
+        stopped_by_op.status == MessageStatus::Stopped && stopped_by_op.completed_at.is_some(),
+        "stop_turn must finalize a pending turn as stopped"
+    );
+    let stopped_again = store
+        .stop_turn(&scope, subject, pending.assistant_message.id)
+        .await
+        .map_err(|error| backend("stop_turn_again", error))?;
+    expect!(
+        "stop_turn_is_idempotent",
+        stopped_again.status == MessageStatus::Stopped
+            && stopped_again.content == stopped_by_op.content,
+        "stopping a terminal turn must return it unchanged"
+    );
+    expect!(
+        "stop_turn_rejects_non_assistant",
+        matches!(
+            store
+                .stop_turn(&scope, subject, pending.user_message.id)
+                .await,
+            Err(StoreError::NotFound)
+        ),
+        "stop_turn must not address a user message"
+    );
+
     // Scope isolation.
     let foreign = store.get_thread(&other, subject, thread.id).await;
     expect!(
