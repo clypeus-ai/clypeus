@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project adheres to Semantic Versioning.
 
+## [1.1.0] - 2026-09-27
+
+Reasoning levels become open, catalog-validated strings.
+
+### Changed
+
+* `clypeus-core`: removed the closed `ReasoningLevel` enum. Reasoning levels
+  are now plain strings: `CompletionRequest.reasoning` is `Option<String>`,
+  and a value is valid when the selected model's catalog advertises it
+  verbatim. Absent, empty, and `"default"` mean "no explicit override"; any
+  other advertised value reaches the provider verbatim.
+* `select_model` (turns and functions) validates requested levels against the
+  effective model's `reasoning_levels` exactly and case-sensitively, still
+  rejecting off-catalog values with `function_reasoning_not_available`. A
+  model that advertises no levels accepts only `"default"`.
+* `clypeus-provider-openai`: sends `reasoning_effort` verbatim, preserves the
+  catalog's level spelling, and no longer converts through an enum. The
+  retry-without-reasoning status set is unchanged.
+* `clypeus-provider-anthropic`: maps known names to thinking budgets
+  (`minimal`/`low` → 1024, `medium` → 4096, `high` → 8192, `xhigh` → 16000,
+  `max` → 32000), omits thinking for `none`, and returns the typed
+  `provider_reasoning_not_available` error naming the model and value for
+  unrecognized names. The Anthropic catalog still advertises no levels.
+* HTTP request fields (`reasoningLevel` on completions, turns, and functions)
+  and response fields (`MessageDto`, usage, function diagnostics) carry the
+  open string; the OpenAPI document documents the semantics.
+* Workspace version is `1.1.0`.
+
 ## [1.0.0] - 2026-09-20
 
 First stable release. The public surface is the crate set listed in the

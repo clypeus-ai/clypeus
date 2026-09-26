@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -50,16 +50,16 @@ url = "2"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
-clypeus-core = { path = "crates/clypeus-core", version = "1.0.0" }
-clypeus-auth-jwks = { path = "crates/clypeus-auth-jwks", version = "1.0.0" }
-clypeus-conformance = { path = "crates/clypeus-conformance", version = "1.0.0" }
-clypeus-provider-anthropic = { path = "crates/clypeus-provider-anthropic", version = "1.0.0" }
-clypeus-provider-openai = { path = "crates/clypeus-provider-openai", version = "1.0.0" }
-clypeus-secret-file = { path = "crates/clypeus-secret-file", version = "1.0.0" }
-clypeus-store-memory = { path = "crates/clypeus-store-memory", version = "1.0.0" }
-clypeus-store-postgres = { path = "crates/clypeus-store-postgres", version = "1.0.0" }
-clypeus-store-sql = { path = "crates/clypeus-store-sql", version = "1.0.0" }
-clypeus-store-sqlite = { path = "crates/clypeus-store-sqlite", version = "1.0.0" }
+clypeus-core = { path = "crates/clypeus-core", version = "1.1.0" }
+clypeus-auth-jwks = { path = "crates/clypeus-auth-jwks", version = "1.1.0" }
+clypeus-conformance = { path = "crates/clypeus-conformance", version = "1.1.0" }
+clypeus-provider-anthropic = { path = "crates/clypeus-provider-anthropic", version = "1.1.0" }
+clypeus-provider-openai = { path = "crates/clypeus-provider-openai", version = "1.1.0" }
+clypeus-secret-file = { path = "crates/clypeus-secret-file", version = "1.1.0" }
+clypeus-store-memory = { path = "crates/clypeus-store-memory", version = "1.1.0" }
+clypeus-store-postgres = { path = "crates/clypeus-store-postgres", version = "1.1.0" }
+clypeus-store-sql = { path = "crates/clypeus-store-sql", version = "1.1.0" }
+clypeus-store-sqlite = { path = "crates/clypeus-store-sqlite", version = "1.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
