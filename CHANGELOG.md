@@ -3,6 +3,45 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project adheres to Semantic Versioning.
 
+## [1.2.0] - 2026-09-27
+
+Cancelled turns become a first-class terminal state with an explicit stop.
+
+### Added
+
+* `MessageStatus::Stopped` (`stopped`): the terminal state of a turn that was
+  cancelled or whose stream consumer disconnected. Partial content, reasoning,
+  and usage are persisted exactly as streamed; the state is exposed through
+  `MessageDto`, `UsageEntryDto`, and the thread usage row.
+* `POST /v1/messages/{id}/stop`: stops a running assistant turn and returns the
+  persisted `TurnResponse`. It is idempotent (a terminal turn is returned
+  unchanged) and answers `404 not_found` for an unknown turn. Stopping a parked
+  turn also refuses its pending tool decisions.
+* `ConversationStore::stop_turn`: atomically finalizes a
+  `pending`/`streaming`/`awaiting_approval` turn as `stopped` without touching
+  its partial output, and leaves terminal turns unchanged.
+* `Orchestrator::stop_turn`/`StopHandle`: a per-message cancellation registry
+  for streamed turns; `StopHandle::wait` resolves once the terminal state is
+  persisted. `spawn_streamed` and `spawn_resumed_streamed` register their
+  turns automatically.
+* `TurnOutcome::Stopped { completion, reason }` with `StopReason::Requested`
+  and `StopReason::ClientDisconnected`.
+* `turn_started` SSE event (`{ threadId, userMessageId, assistantMessageId }`),
+  emitted before `context` so a consumer can address the stop route while the
+  turn runs.
+
+### Changed
+
+* A dropped SSE/HTTP consumer now finalizes the turn as `stopped` with
+  `errorDetail: "client_disconnected"` instead of `provider_unreachable`; the
+  cancellation is selected against the in-flight provider read, so it does not
+  wait for the next delta or the next tool result.
+* Streamed stop requests cancel the provider read immediately and skip any
+  remaining tool calls. The `turn_completed` view (with `status: "stopped"`)
+  still closes the stream when the consumer is connected.
+* `error_detail` is `null` for an explicit stop.
+* Workspace version is `1.2.0`.
+
 ## [1.1.0] - 2026-09-27
 
 Reasoning levels become open, catalog-validated strings.
