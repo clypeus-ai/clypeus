@@ -167,6 +167,8 @@ pub struct MessageDto {
     pub context_version: Option<String>,
     pub context_json: Option<serde_json::Value>,
     pub model: Option<String>,
+    /// Reasoning level applied to this turn; `null` when no explicit override
+    /// was requested.
     pub reasoning_level: Option<String>,
     pub status: String,
     pub error_detail: Option<String>,
@@ -329,6 +331,9 @@ pub struct CreateTurnRequest {
     pub stream: bool,
     #[serde(default)]
     pub model: Option<String>,
+    /// Open reasoning level. Must match one of the effective model's
+    /// advertised levels verbatim; absent, empty, and `"default"` mean "no
+    /// explicit override" and anything else is forwarded to the provider.
     #[serde(default)]
     pub reasoning_level: Option<String>,
     #[serde(default)]
@@ -344,6 +349,9 @@ pub struct EditTurnRequest {
     pub stream: bool,
     #[serde(default)]
     pub model: Option<String>,
+    /// Open reasoning level. Must match one of the effective model's
+    /// advertised levels verbatim; absent, empty, and `"default"` mean "no
+    /// explicit override" and anything else is forwarded to the provider.
     #[serde(default)]
     pub reasoning_level: Option<String>,
     #[serde(default)]
@@ -357,6 +365,9 @@ pub struct RegenerateTurnRequest {
     pub stream: bool,
     #[serde(default)]
     pub model: Option<String>,
+    /// Open reasoning level. Must match one of the effective model's
+    /// advertised levels verbatim; absent, empty, and `"default"` mean "no
+    /// explicit override" and anything else is forwarded to the provider.
     #[serde(default)]
     pub reasoning_level: Option<String>,
     #[serde(default)]
@@ -480,6 +491,8 @@ pub struct ModelsPreviewRequest {
 pub struct CompletionsRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    /// Open reasoning level forwarded to the provider verbatim; absent, empty,
+    /// and `"default"` send no override.
     #[serde(default)]
     pub reasoning_level: Option<String>,
     #[serde(default)]
@@ -513,6 +526,8 @@ pub struct UsageResponse {
 pub struct UsageEntryDto {
     pub message_id: Uuid,
     pub model: Option<String>,
+    /// Reasoning level applied to this turn; `null` when no explicit override
+    /// was requested.
     pub reasoning_level: Option<String>,
     pub status: String,
     pub usage: TokenUsage,

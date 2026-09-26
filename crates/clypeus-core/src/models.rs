@@ -6,44 +6,6 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Reasoning intensity advertised by a model catalog.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningLevel {
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
-    /// Provider default; no explicit override is sent.
-    Default,
-}
-
-impl ReasoningLevel {
-    pub fn as_wire(self) -> &'static str {
-        match self {
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Default => "default",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "minimal" => Some(Self::Minimal),
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            "xhigh" | "x-high" | "very_high" | "very-high" => Some(Self::XHigh),
-            "default" | "auto" => Some(Self::Default),
-            _ => None,
-        }
-    }
-}
-
 /// Provider backend a scope is configured to use.
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize, ToSchema,
@@ -226,14 +188,6 @@ mod tests {
         assert_eq!(ProviderKind::parse("claude"), Some(ProviderKind::Anthropic));
         assert_eq!(ProviderKind::parse("OPEN_AI"), Some(ProviderKind::Openai));
         assert_eq!(ProviderKind::parse("other"), None);
-    }
-
-    #[test]
-    fn reasoning_level_parses_catalog_spellings() {
-        assert_eq!(ReasoningLevel::parse("x-high"), Some(ReasoningLevel::XHigh));
-        assert_eq!(ReasoningLevel::parse("auto"), Some(ReasoningLevel::Default));
-        assert_eq!(ReasoningLevel::parse("ultra"), None);
-        assert_eq!(ReasoningLevel::XHigh.as_wire(), "xhigh");
     }
 
     #[test]

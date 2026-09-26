@@ -199,7 +199,7 @@ impl Provider for OpenAiProvider {
                     .find(|outcome| !outcome.is_empty())
                     .unwrap_or_default());
             }
-            if request.reasoning.is_some() {
+            if has_reasoning(&request) {
                 strip_reasoning(&mut payload);
                 let retry = self
                     .auth(self.http.post(&url), config)
@@ -228,8 +228,7 @@ impl Provider for OpenAiProvider {
             return Err(ProviderError::EmptyResponse);
         }
 
-        if request.reasoning.is_some()
-            && ProviderError::is_retryable_reasoning_failure(status.as_u16())
+        if has_reasoning(&request) && ProviderError::is_retryable_reasoning_failure(status.as_u16())
         {
             strip_reasoning(&mut payload);
             let retry = self
@@ -279,7 +278,7 @@ impl Provider for OpenAiProvider {
         let response = match self.start_stream(&url, config, &payload).await? {
             response if response.status().is_success() => response,
             response
-                if request.reasoning.is_some()
+                if has_reasoning(&request)
                     && ProviderError::is_retryable_reasoning_failure(
                         response.status().as_u16(),
                     ) =>
@@ -356,6 +355,11 @@ fn is_jsonish(content_type: &str, body: &str) -> bool {
     trimmed.starts_with('{') || trimmed.starts_with('[')
 }
 
+/// True when the request carries a reasoning override worth retrying without.
+fn has_reasoning(request: &CompletionRequest) -> bool {
+    clypeus_core::provider::reasoning_override(request.reasoning.as_deref()).is_some()
+}
+
 /// Builds the Chat Completions payload.
 pub fn build_payload(request: &CompletionRequest, stream: bool) -> Value {
     let mut payload = Map::new();
@@ -382,12 +386,12 @@ pub fn build_payload(request: &CompletionRequest, stream: bool) -> Value {
         payload.insert("stream".into(), Value::Bool(true));
         payload.insert("stream_options".into(), json!({"include_usage": true}));
     }
-    if let Some(reasoning) = request.reasoning
-        && reasoning != clypeus_core::models::ReasoningLevel::Default
+    if let Some(reasoning) =
+        clypeus_core::provider::reasoning_override(request.reasoning.as_deref())
     {
         payload.insert(
             "reasoning_effort".into(),
-            Value::String(reasoning.as_wire().to_string()),
+            Value::String(reasoning.to_string()),
         );
     }
     Value::Object(payload)
@@ -797,9 +801,9 @@ fn extract_default_reasoning_level(item: &Value) -> Option<String> {
     ];
     for path in &candidates {
         if let Some(value) = walk_path(item, path).and_then(Value::as_str) {
-            let lower = value.trim().to_ascii_lowercase();
-            if !lower.is_empty() && lower != "null" {
-                return Some(lower);
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("null") {
+                return Some(trimmed.to_string());
             }
         }
     }
@@ -807,7 +811,7 @@ fn extract_default_reasoning_level(item: &Value) -> Option<String> {
 }
 
 fn extract_reasoning_levels(item: &Value) -> Vec<String> {
-    let mut found = Vec::new();
+    let mut found: Vec<String> = Vec::new();
     let candidates = [
         ["supported_reasoning_levels"].as_slice(),
         &["supported_reasoning_efforts"],
@@ -826,9 +830,11 @@ fn extract_reasoning_levels(item: &Value) -> Vec<String> {
         if let Some(array) = walk_path(item, path).and_then(Value::as_array) {
             for value in array {
                 if let Some(level) = value.as_str() {
-                    let lower = level.trim().to_ascii_lowercase();
-                    if !lower.is_empty() && !found.contains(&lower) {
-                        found.push(lower);
+                    let trimmed = level.trim();
+                    if !trimmed.is_empty()
+                        && !found.iter().any(|existing| existing.as_str() == trimmed)
+                    {
+                        found.push(trimmed.to_string());
                     }
                 }
             }
@@ -844,5 +850,160 @@ impl std::fmt::Debug for OpenAiStreamDecoder {
             .field("content_len", &self.content.len())
             .field("tool_calls", &self.tool_calls.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(reasoning: Option<&str>) -> CompletionRequest {
+        CompletionRequest {
+            model: "ubi-model".into(),
+            messages: vec![ChatMessage::text(ChatRole::User, "hi")],
+            reasoning: reasoning.map(str::to_string),
+            tools: Vec::new(),
+            tool_choice: clypeus_core::provider::ToolChoice::None,
+            max_output_tokens: 128,
+        }
+    }
+
+    fn catalog_item(item: Value) -> ModelCapability {
+        parse_model_capability(&item).expect("capability parses")
+    }
+
+    #[test]
+    fn unibridge_catalog_exposes_open_levels() {
+        let root = json!({
+            "data": [{
+                "id": "ubi-model",
+                "reasoning": {
+                    "supported": true,
+                    "levels": ["default", "none", "max", "xhigh"],
+                    "default": "max"
+                }
+            }]
+        });
+        let catalog = parse_model_catalog(&root);
+        assert_eq!(catalog.models.len(), 1);
+        let capability = &catalog.models[0];
+        assert_eq!(capability.model, "ubi-model");
+        assert_eq!(
+            capability.reasoning_levels,
+            vec!["default", "none", "max", "xhigh"]
+        );
+        assert_eq!(capability.default_reasoning_level, "max");
+    }
+
+    #[test]
+    fn catalog_respects_reasoning_supported_false() {
+        let item = json!({
+            "id": "plain",
+            "reasoning": {"supported": false, "levels": ["low", "high"]}
+        });
+        let capability = catalog_item(item);
+        assert!(capability.reasoning_levels.is_empty());
+        assert!(capability.default_reasoning_level.is_empty());
+
+        let item = json!({
+            "id": "plain",
+            "capabilities": {"reasoning": false},
+            "reasoning": {"levels": ["low", "high"]}
+        });
+        let capability = catalog_item(item);
+        assert!(capability.reasoning_levels.is_empty());
+    }
+
+    #[test]
+    fn catalog_preserves_level_spelling_verbatim() {
+        let item = json!({
+            "id": "spelled",
+            "reasoning": {"levels": ["Low", "HIGH", "low", "none"]}
+        });
+        let capability = catalog_item(item);
+        assert_eq!(
+            capability.reasoning_levels,
+            vec!["Low", "HIGH", "low", "none"]
+        );
+    }
+
+    #[test]
+    fn catalog_reads_default_from_alias_paths() {
+        let aliases = [
+            json!({"id": "m", "default_reasoning_effort": "max",
+                   "reasoning": {"levels": ["max"]}}),
+            json!({"id": "m", "reasoning": {"levels": ["max"], "default": "max"}}),
+            json!({"id": "m", "metadata": {"default_reasoning_effort": "max"},
+                   "reasoning": {"levels": ["max"]}}),
+            json!({"id": "m", "metadata": {"reasoning": {"default": "max"}},
+                   "reasoning": {"levels": ["max"]}}),
+        ];
+        for item in aliases {
+            let capability = catalog_item(item.clone());
+            assert_eq!(
+                capability.default_reasoning_level, "max",
+                "default not read from {item}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_default_falls_back_within_advertised_levels() {
+        let item = json!({
+            "id": "m",
+            "reasoning": {"levels": ["low", "high"], "default": "off-catalog"}
+        });
+        let capability = catalog_item(item);
+        assert_eq!(capability.default_reasoning_level, "low");
+
+        let item = json!({"id": "m", "reasoning": {"supported": true}});
+        let capability = catalog_item(item);
+        assert!(capability.reasoning_levels.is_empty());
+        assert!(capability.default_reasoning_level.is_empty());
+    }
+
+    #[test]
+    fn catalog_accepts_model_identifier_candidates() {
+        for key in ["id", "name", "model", "slug"] {
+            let item = json!({key: "candidate-model",
+                              "reasoning": {"levels": ["low"]}});
+            assert_eq!(catalog_item(item).model, "candidate-model");
+        }
+        assert!(parse_model_capability(&json!({"id": "  "})).is_none());
+        assert!(parse_model_capability(&json!({"id": 7})).is_none());
+    }
+
+    #[test]
+    fn payload_sends_reasoning_effort_verbatim() {
+        for level in ["minimal", "none", "max", "xhigh", "custom-id"] {
+            let payload = build_payload(&request(Some(level)), false);
+            assert_eq!(payload["reasoning_effort"], level, "level {level}");
+        }
+    }
+
+    #[test]
+    fn payload_omits_sentinel_and_empty_reasoning() {
+        for level in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("default"),
+            Some(" default "),
+        ] {
+            let payload = build_payload(&request(level), false);
+            assert!(
+                payload.get("reasoning_effort").is_none(),
+                "reasoning_effort must be absent for {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_without_reasoning_uses_has_reasoning() {
+        assert!(has_reasoning(&request(Some("max"))));
+        assert!(!has_reasoning(&request(Some("default"))));
+        assert!(!has_reasoning(&request(None)));
+        assert!(ProviderError::is_retryable_reasoning_failure(422));
+        assert!(!ProviderError::is_retryable_reasoning_failure(500));
     }
 }

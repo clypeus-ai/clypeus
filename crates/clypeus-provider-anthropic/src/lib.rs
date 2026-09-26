@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use clypeus_core::models::{ChatMessage, ChatRole, ReasoningLevel, TokenUsage, ToolCall, ToolSpec};
+use clypeus_core::models::{ChatMessage, ChatRole, TokenUsage, ToolCall, ToolSpec};
 use clypeus_core::provider::{
     AssistantOutcome, CompletionRequest, ModelCapability, ModelCatalog, PayloadEvent, ProbeReport,
     Provider, ProviderConfig, ProviderError, ProviderStream, RoundDelta, StreamAccumulator,
@@ -182,7 +182,7 @@ impl Provider for AnthropicProvider {
         request: CompletionRequest,
     ) -> Result<AssistantOutcome, ProviderError> {
         let url = self.endpoint(config)?;
-        let mut payload = build_payload(&request, false);
+        let mut payload = build_payload(&request, false)?;
         let response = self
             .headers(self.http.post(&url), config)
             .header("content-type", "application/json")
@@ -204,7 +204,7 @@ impl Provider for AnthropicProvider {
             if !outcome.is_empty() {
                 return Ok(outcome);
             }
-            if request.reasoning.is_some() {
+            if has_reasoning(&request) {
                 strip_reasoning(&mut payload);
                 let retry = self
                     .headers(self.http.post(&url), config)
@@ -231,8 +231,7 @@ impl Provider for AnthropicProvider {
             return Err(ProviderError::EmptyResponse);
         }
 
-        if request.reasoning.is_some()
-            && ProviderError::is_retryable_reasoning_failure(status.as_u16())
+        if has_reasoning(&request) && ProviderError::is_retryable_reasoning_failure(status.as_u16())
         {
             strip_reasoning(&mut payload);
             let retry = self
@@ -276,11 +275,11 @@ impl Provider for AnthropicProvider {
         request: CompletionRequest,
     ) -> Result<ProviderStream, ProviderError> {
         let url = self.endpoint(config)?;
-        let mut payload = build_payload(&request, true);
+        let mut payload = build_payload(&request, true)?;
         let response = match self.start_stream(&url, config, &payload).await? {
             response if response.status().is_success() => response,
             response
-                if request.reasoning.is_some()
+                if has_reasoning(&request)
                     && ProviderError::is_retryable_reasoning_failure(
                         response.status().as_u16(),
                     ) =>
@@ -328,8 +327,13 @@ fn map_send_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
+/// True when the request carries a reasoning override worth retrying without.
+fn has_reasoning(request: &CompletionRequest) -> bool {
+    clypeus_core::provider::reasoning_override(request.reasoning.as_deref()).is_some()
+}
+
 /// Builds the Messages payload.
-pub fn build_payload(request: &CompletionRequest, stream: bool) -> Value {
+pub fn build_payload(request: &CompletionRequest, stream: bool) -> Result<Value, ProviderError> {
     let mut payload = Map::new();
     payload.insert("model".into(), Value::String(request.model.clone()));
     payload.insert(
@@ -371,19 +375,18 @@ pub fn build_payload(request: &CompletionRequest, stream: bool) -> Value {
     if stream {
         payload.insert("stream".into(), Value::Bool(true));
     }
-    if let Some(reasoning) = request
-        .reasoning
-        .filter(|level| *level != ReasoningLevel::Default)
-    {
-        payload.insert(
-            "thinking".into(),
-            json!({
-                "type": "enabled",
-                "budget_tokens": anthropic_budget_tokens(reasoning)
-            }),
-        );
+    if let Some(level) = clypeus_core::provider::reasoning_override(request.reasoning.as_deref()) {
+        if let Some(budget) = anthropic_thinking(&request.model, level)? {
+            payload.insert(
+                "thinking".into(),
+                json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                }),
+            );
+        }
     }
-    Value::Object(payload)
+    Ok(Value::Object(payload))
 }
 
 fn strip_reasoning(payload: &mut Value) {
@@ -392,13 +395,35 @@ fn strip_reasoning(payload: &mut Value) {
     }
 }
 
-/// Explicit thinking budget for each reasoning level.
-pub fn anthropic_budget_tokens(level: ReasoningLevel) -> u32 {
-    match level {
-        ReasoningLevel::Minimal | ReasoningLevel::Low => 1_024,
-        ReasoningLevel::Medium | ReasoningLevel::Default => 4_096,
-        ReasoningLevel::High => 8_192,
-        ReasoningLevel::XHigh => 16_000,
+/// Resolves the thinking configuration for one reasoning level value.
+///
+/// `Ok(Some(budget))` enables thinking with an explicit token budget,
+/// `Ok(None)` means the level asks for no thinking block (`none`), and an
+/// unrecognized name is a typed provider error naming the model and value.
+fn anthropic_thinking(model: &str, level: &str) -> Result<Option<u32>, ProviderError> {
+    if level.trim().eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    match anthropic_budget_tokens(level) {
+        Some(budget) => Ok(Some(budget)),
+        None => Err(ProviderError::UnsupportedReasoning {
+            model: model.to_string(),
+            value: level.to_string(),
+        }),
+    }
+}
+
+/// Explicit thinking budget for each known Anthropic reasoning level name.
+/// Unrecognized names and `none` yield `None`; the payload builder
+/// distinguishes the two before consulting this helper.
+pub fn anthropic_budget_tokens(level: &str) -> Option<u32> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "minimal" | "low" => Some(1_024),
+        "medium" => Some(4_096),
+        "high" => Some(8_192),
+        "xhigh" => Some(16_000),
+        "max" => Some(32_000),
+        _ => None,
     }
 }
 
@@ -648,5 +673,96 @@ pub fn parse_anthropic_catalog(root: &Value) -> ModelCatalog {
                 })
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clypeus_core::provider::DEFAULT_REASONING_LEVEL;
+
+    fn request(model: &str, reasoning: Option<&str>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: vec![ChatMessage::text(ChatRole::User, "hi")],
+            reasoning: reasoning.map(str::to_string),
+            tools: Vec::new(),
+            tool_choice: clypeus_core::provider::ToolChoice::None,
+            max_output_tokens: 256,
+        }
+    }
+
+    #[test]
+    fn budget_tokens_cover_known_names() {
+        assert_eq!(anthropic_budget_tokens("minimal"), Some(1_024));
+        assert_eq!(anthropic_budget_tokens("low"), Some(1_024));
+        assert_eq!(anthropic_budget_tokens("medium"), Some(4_096));
+        assert_eq!(anthropic_budget_tokens("high"), Some(8_192));
+        assert_eq!(anthropic_budget_tokens("xhigh"), Some(16_000));
+        assert_eq!(anthropic_budget_tokens("max"), Some(32_000));
+        assert_eq!(anthropic_budget_tokens("HIGH"), Some(8_192));
+        assert_eq!(anthropic_budget_tokens("none"), None);
+        assert_eq!(anthropic_budget_tokens("custom-id"), None);
+    }
+
+    #[test]
+    fn payload_enables_thinking_with_the_mapped_budget() {
+        let payload = build_payload(&request("claude-x", Some("high")), false).unwrap();
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["thinking"]["budget_tokens"], 8_192);
+        assert!(payload.get("stream").is_none());
+
+        let payload = build_payload(&request("claude-x", Some("max")), true).unwrap();
+        assert_eq!(payload["thinking"]["budget_tokens"], 32_000);
+        assert_eq!(payload["stream"], true);
+    }
+
+    #[test]
+    fn payload_omits_thinking_for_none_and_sentinel() {
+        for level in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("none"),
+            Some(DEFAULT_REASONING_LEVEL),
+        ] {
+            let payload = build_payload(&request("claude-x", level), false).unwrap();
+            assert!(
+                payload.get("thinking").is_none(),
+                "thinking must be absent for {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_errors_on_unknown_level_naming_model_and_value() {
+        let error = build_payload(&request("claude-x", Some("ultra")), false).unwrap_err();
+        assert_eq!(error.code(), "provider_reasoning_not_available");
+        assert_eq!(
+            error,
+            ProviderError::UnsupportedReasoning {
+                model: "claude-x".into(),
+                value: "ultra".into(),
+            }
+        );
+        let message = error.safe_message();
+        assert!(message.contains("claude-x"), "message: {message}");
+        assert!(message.contains("ultra"), "message: {message}");
+    }
+
+    #[test]
+    fn anthropic_catalog_advertises_no_levels() {
+        let root = json!({"data": [{"id": "claude-x", "display_name": "Claude X"}]});
+        let catalog = parse_anthropic_catalog(&root);
+        assert_eq!(catalog.models.len(), 1);
+        assert!(catalog.models[0].reasoning_levels.is_empty());
+        assert!(catalog.models[0].default_reasoning_level.is_empty());
+    }
+
+    #[test]
+    fn has_reasoning_ignores_the_sentinel() {
+        assert!(has_reasoning(&request("m", Some("high"))));
+        assert!(!has_reasoning(&request("m", Some("default"))));
+        assert!(!has_reasoning(&request("m", None)));
     }
 }

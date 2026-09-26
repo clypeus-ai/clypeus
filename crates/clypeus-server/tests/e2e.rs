@@ -34,12 +34,14 @@ enum MockMode {
 struct MockState {
     mode: MockMode,
     calls: std::sync::atomic::AtomicUsize,
+    last_reasoning_effort: std::sync::Mutex<Option<Value>>,
 }
 
 async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
     let state = Arc::new(MockState {
         mode,
         calls: std::sync::atomic::AtomicUsize::new(0),
+        last_reasoning_effort: std::sync::Mutex::new(None),
     });
     let router = Router::new()
         .route("/v1/models", get(mock_models))
@@ -61,7 +63,11 @@ async fn mock_models() -> Json<Value> {
             "id": "mock-model",
             "object": "model",
             "capabilities": {"reasoning": true},
-            "reasoning": {"supported": true, "levels": ["low", "medium", "high"], "default": "low"}
+            "reasoning": {
+                "supported": true,
+                "levels": ["default", "none", "low", "medium", "high", "max", "xhigh"],
+                "default": "low"
+            }
         }]
     }))
 }
@@ -88,6 +94,7 @@ async fn mock_chat(
     state
         .calls
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *state.last_reasoning_effort.lock().expect("lock") = body.get("reasoning_effort").cloned();
     let has_tool_result = body
         .get("messages")
         .and_then(Value::as_array)
@@ -317,6 +324,79 @@ async fn plain_chat_completes_buffered() {
     let usage = harness.get(&format!("/v1/threads/{thread}/usage")).await;
     let usage: Value = usage.json().await.unwrap();
     assert_eq!(usage["total"]["totalTokens"], 6);
+}
+
+#[tokio::test]
+async fn reasoning_levels_are_open_catalog_validated_strings() {
+    let harness = harness(MockMode::Plain).await;
+    let thread = harness.create_thread().await;
+
+    let response = harness
+        .post(
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"content": "hello", "stream": false, "reasoningLevel": "max"}),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "advertised level is accepted");
+    let turn: Value = response.json().await.unwrap();
+    assert_eq!(turn["assistantMessage"]["reasoningLevel"], "max");
+    assert_eq!(
+        *harness.mock.last_reasoning_effort.lock().unwrap(),
+        Some(json!("max")),
+        "advertised level reaches the provider verbatim"
+    );
+
+    let response = harness
+        .post(
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"content": "hello", "stream": false, "reasoningLevel": "default"}),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "the sentinel is always accepted");
+    let turn: Value = response.json().await.unwrap();
+    assert!(
+        turn["assistantMessage"]["reasoningLevel"].is_null(),
+        "the sentinel stores no override"
+    );
+    assert_eq!(
+        *harness.mock.last_reasoning_effort.lock().unwrap(),
+        None,
+        "the sentinel sends no reasoning parameter"
+    );
+
+    for level in ["ultra", "MAX"] {
+        let response = harness
+            .post(
+                &format!("/v1/threads/{thread}/messages"),
+                json!({"content": "hello", "stream": false, "reasoningLevel": level}),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            400,
+            "off-catalog level {level} is rejected"
+        );
+        let problem: Value = response.json().await.unwrap();
+        assert_eq!(problem["code"], "function_reasoning_not_available");
+    }
+
+    // `/v1/completions` forwards any string to the provider verbatim.
+    let response = harness
+        .post(
+            "/v1/completions",
+            json!({
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoningLevel": "custom-id",
+                "stream": false
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        *harness.mock.last_reasoning_effort.lock().unwrap(),
+        Some(json!("custom-id"))
+    );
 }
 
 #[tokio::test]

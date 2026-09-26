@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::models::{ChatMessage, ProviderKind, ReasoningLevel, TokenUsage, ToolCall, ToolSpec};
+use crate::models::{ChatMessage, ProviderKind, TokenUsage, ToolCall, ToolSpec};
 use crate::secrets::SecretString;
+
+/// Fixed error code returned when a provider does not recognize a reasoning
+/// level value.
+pub const REASONING_NOT_AVAILABLE_CODE: &str = "provider_reasoning_not_available";
 
 /// Transport-level provider failure. Only [`ProviderError::code`] and
 /// [`ProviderError::safe_message`] may leave the process.
@@ -38,6 +42,8 @@ pub enum ProviderError {
     Stream(String),
     #[error("Provider completed the turn without an answer")]
     EmptyResponse,
+    #[error("Provider does not recognize reasoning level '{value}' for model '{model}'")]
+    UnsupportedReasoning { model: String, value: String },
 }
 
 impl ProviderError {
@@ -51,6 +57,7 @@ impl ProviderError {
             Self::InvalidPayload(_) => "provider_invalid_response",
             Self::Stream(_) => "provider_stream_error",
             Self::EmptyResponse => "provider_empty_response",
+            Self::UnsupportedReasoning { .. } => REASONING_NOT_AVAILABLE_CODE,
         }
     }
 
@@ -68,6 +75,9 @@ impl ProviderError {
             Self::InvalidPayload(_) => "The provider returned an invalid response.".to_string(),
             Self::Stream(_) => "The provider stream failed.".to_string(),
             Self::EmptyResponse => "The provider completed the turn without an answer.".to_string(),
+            Self::UnsupportedReasoning { model, value } => format!(
+                "The provider does not support reasoning level '{value}' for model '{model}'."
+            ),
         }
     }
 
@@ -145,12 +155,27 @@ impl ToolChoice {
     }
 }
 
+/// Reasoning-level sentinel that means "no explicit override": the provider's
+/// own default applies.
+pub const DEFAULT_REASONING_LEVEL: &str = "default";
+
+/// Normalizes a caller-supplied reasoning level. Absent, empty and the
+/// `"default"` sentinel mean "no override"; every other value is returned
+/// trimmed and verbatim so it reaches the provider exactly as requested.
+pub fn reasoning_override(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|level| !level.is_empty() && *level != DEFAULT_REASONING_LEVEL)
+}
+
 /// One provider completion request.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
-    pub reasoning: Option<ReasoningLevel>,
+    /// Open reasoning level. `None` (or the `"default"` sentinel) sends no
+    /// override; any other value is forwarded to the provider verbatim.
+    pub reasoning: Option<String>,
     pub tools: Vec<ToolSpec>,
     pub tool_choice: ToolChoice,
     pub max_output_tokens: i32,
@@ -177,7 +202,11 @@ impl AssistantOutcome {
 #[serde(rename_all = "camelCase")]
 pub struct ModelCapability {
     pub model: String,
+    /// Reasoning level names the model advertises, verbatim. Empty when the
+    /// model accepts no explicit reasoning override.
     pub reasoning_levels: Vec<String>,
+    /// Level the provider uses when a request names none. Empty or `"default"`
+    /// when the provider has no explicit default.
     pub default_reasoning_level: String,
 }
 

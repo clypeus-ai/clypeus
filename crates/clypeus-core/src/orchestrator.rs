@@ -27,9 +27,7 @@ use crate::broker::{
 use crate::context::TurnContext;
 use crate::guard::GuardPolicy;
 use crate::metrics;
-use crate::models::{
-    ChatMessage, ChatRole, ProviderKind, ReasoningLevel, TokenUsage, ToolCall, ToolSpec,
-};
+use crate::models::{ChatMessage, ChatRole, ProviderKind, TokenUsage, ToolCall, ToolSpec};
 use crate::principal::ScopeId;
 use crate::provider::{
     AssistantOutcome, CompletionRequest, ProviderConfig, ProviderError, ProviderRegistry,
@@ -74,7 +72,8 @@ pub struct TurnRequest {
     pub provider_kind: ProviderKind,
     pub provider: ProviderConfig,
     pub model: String,
-    pub reasoning: Option<ReasoningLevel>,
+    /// Open reasoning level; `None` means no override.
+    pub reasoning: Option<String>,
     /// System prompt + history, root first.
     pub messages: Vec<ChatMessage>,
     /// Allowed tool catalog for this caller (already scope-filtered).
@@ -116,7 +115,8 @@ pub struct ResumeProvider {
     pub provider_kind: ProviderKind,
     pub provider: ProviderConfig,
     pub model: String,
-    pub reasoning: Option<ReasoningLevel>,
+    /// Open reasoning level; `None` means no override.
+    pub reasoning: Option<String>,
 }
 
 /// The decision that resumes a parked turn.
@@ -553,7 +553,7 @@ impl Orchestrator {
             provider_kind: request.provider.provider_kind,
             provider: request.provider.provider.clone(),
             model: request.provider.model.clone(),
-            reasoning: request.provider.reasoning,
+            reasoning: request.provider.reasoning.clone(),
             messages,
             tools: request.tools.clone(),
             caller: request.caller.clone(),
@@ -612,7 +612,7 @@ impl Orchestrator {
             let completion_request = CompletionRequest {
                 model: request.model.clone(),
                 messages: messages.clone(),
-                reasoning: request.reasoning,
+                reasoning: request.reasoning.clone(),
                 tools: if offering {
                     request.tools.clone()
                 } else {

@@ -13,7 +13,7 @@ use clypeus_core::audit::AuditQuery;
 use clypeus_core::broker::{ApprovalGrant, Caller, ToolCallRequest};
 use clypeus_core::context::{TurnContext, TurnContextInput};
 use clypeus_core::functions::RunFunctionRequest;
-use clypeus_core::models::{ChatMessage, ChatRole, ProviderKind, ReasoningLevel, ToolSpec};
+use clypeus_core::models::{ChatMessage, ChatRole, ProviderKind, ToolSpec};
 use clypeus_core::orchestrator::{
     ResumeAction, ResumeProvider, ResumeRequest, TurnRequest, budget_for,
 };
@@ -255,11 +255,8 @@ pub async fn completions(
         .into_response());
     }
 
-    let reasoning = request
-        .reasoning_level
-        .as_deref()
-        .and_then(ReasoningLevel::parse)
-        .filter(|level| *level != ReasoningLevel::Default);
+    let reasoning = clypeus_core::provider::reasoning_override(request.reasoning_level.as_deref())
+        .map(str::to_string);
     let tools = request.tools.clone().unwrap_or_default();
     let tool_choice = request
         .tool_choice
@@ -575,7 +572,6 @@ async fn run_turn(
         plan.reasoning_level.as_deref(),
     )
     .map_err(|error| ApiError::bad_request(error.code, error.detail))?;
-    let reasoning = reasoning.and_then(|level| ReasoningLevel::parse(&level));
 
     let context = state
         .context_provider
@@ -609,7 +605,7 @@ async fn run_turn(
                 content: plan.content,
                 title: None,
                 model: Some(model.clone()),
-                reasoning_level: reasoning.map(|level| level.as_wire().to_string()),
+                reasoning_level: reasoning.clone(),
                 context_version: Some(context.version.clone()),
                 context_json,
             },
@@ -865,10 +861,7 @@ pub async fn submit_approval(
             provider_kind: settings.provider_kind,
             provider: config,
             model: message.model.clone().unwrap_or_default(),
-            reasoning: message
-                .reasoning_level
-                .as_deref()
-                .and_then(ReasoningLevel::parse),
+            reasoning: message.reasoning_level.clone(),
         },
         tools: state.broker.specs_for(&principal.scopes),
         caller,

@@ -31,6 +31,15 @@ admin scope.
 * `PUT|DELETE /v1/messages/{id}/feedback`
 * `GET /v1/threads/{id}/usage` — token usage across the thread.
 
+### Reasoning levels
+
+`reasoningLevel` is an open string. A turn or function accepts a value only
+when the effective model's catalog advertises it verbatim (case-sensitive);
+absent, empty, and `"default"` always mean "no explicit override" and send no
+reasoning parameter. Accepted values are forwarded to the provider unchanged,
+and `POST /v1/completions` forwards any value verbatim without catalog
+validation.
+
 ### SSE events
 
 Text and reasoning stream as anonymous `data:` chunks

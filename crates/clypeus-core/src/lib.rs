@@ -53,9 +53,7 @@ pub use functions::{
     RunFunctionResponse,
 };
 pub use guard::{GuardHit, GuardPolicy, NeutralGuardPolicy, classify, classify_neutral};
-pub use models::{
-    ChatMessage, ChatRole, ProviderKind, ReasoningLevel, TokenUsage, ToolCall, ToolSpec,
-};
+pub use models::{ChatMessage, ChatRole, ProviderKind, TokenUsage, ToolCall, ToolSpec};
 pub use orchestrator::{
     Orchestrator, ResumeAction, ResumeProvider, ResumeRequest, TurnCompletion, TurnLimits,
     TurnOutcome, TurnRequest, budget_for,
@@ -66,9 +64,10 @@ pub use principal::{
 };
 pub use profile::{ProfileSelection, ProfileStore, PromptProfile, StaticProfileStore};
 pub use provider::{
-    AssistantOutcome, CompletionRequest, ModelCapability, ModelCatalog, ProbeReport, Provider,
-    ProviderConfig, ProviderError, ProviderRegistry, ProviderStream, SseSplitter,
-    StreamAccumulator, StreamDecoder, StreamDelta, ToolChoice, validate_base_url,
+    AssistantOutcome, CompletionRequest, DEFAULT_REASONING_LEVEL, ModelCapability, ModelCatalog,
+    ProbeReport, Provider, ProviderConfig, ProviderError, ProviderRegistry, ProviderStream,
+    SseSplitter, StreamAccumulator, StreamDecoder, StreamDelta, ToolChoice, reasoning_override,
+    validate_base_url,
 };
 pub use rate_limit::{InMemoryRateLimiter, RateKey, RateLimitError, RateLimiter, RateSnapshot};
 pub use secrets::{SecretError, SecretStore, SecretString};

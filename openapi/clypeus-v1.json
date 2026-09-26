@@ -252,6 +252,7 @@
             "type": "string"
           },
           "reasoningLevel": {
+            "description": "Open reasoning level forwarded to the provider verbatim; absent, empty,\nand `\"default\"` send no override.",
             "type": [
               "string",
               "null"
@@ -358,6 +359,7 @@
             ]
           },
           "reasoningLevel": {
+            "description": "Open reasoning level. Must match one of the effective model's\nadvertised levels verbatim; absent, empty, and `\"default\"` mean \"no\nexplicit override\" and anything else is forwarded to the provider.",
             "type": [
               "string",
               "null"
@@ -394,6 +396,7 @@
             ]
           },
           "reasoningLevel": {
+            "description": "Open reasoning level. Must match one of the effective model's\nadvertised levels verbatim; absent, empty, and `\"default\"` mean \"no\nexplicit override\" and anything else is forwarded to the provider.",
             "type": [
               "string",
               "null"
@@ -489,6 +492,7 @@
             "type": "string"
           },
           "reasoningLevel": {
+            "description": "Reasoning level applied to the run; `\"default\"` when no explicit\noverride was requested.",
             "type": "string"
           },
           "usage": {
@@ -588,6 +592,7 @@
             ]
           },
           "reasoningLevel": {
+            "description": "Reasoning level applied to this turn; `null` when no explicit override\nwas requested.",
             "type": [
               "string",
               "null"
@@ -695,12 +700,14 @@
         "description": "One model advertised by a provider catalog.",
         "properties": {
           "defaultReasoningLevel": {
+            "description": "Level the provider uses when a request names none. Empty or `\"default\"`\nwhen the provider has no explicit default.",
             "type": "string"
           },
           "model": {
             "type": "string"
           },
           "reasoningLevels": {
+            "description": "Reasoning level names the model advertises, verbatim. Empty when the\nmodel accepts no explicit reasoning override.",
             "items": {
               "type": "string"
             },
@@ -879,6 +886,7 @@
             ]
           },
           "reasoningLevel": {
+            "description": "Open reasoning level. Must match one of the effective model's\nadvertised levels verbatim; absent, empty, and `\"default\"` mean \"no\nexplicit override\" and anything else is forwarded to the provider.",
             "type": [
               "string",
               "null"
@@ -901,6 +909,7 @@
             ]
           },
           "reasoningLevel": {
+            "description": "Open reasoning level. Must match one of the effective model's\nadvertised levels verbatim; absent, empty, and `\"default\"` mean \"no\nexplicit override\" and anything else is forwarded to the provider.",
             "type": [
               "string",
               "null"
@@ -1474,6 +1483,7 @@
             ]
           },
           "reasoningLevel": {
+            "description": "Reasoning level applied to this turn; `null` when no explicit override\nwas requested.",
             "type": [
               "string",
               "null"

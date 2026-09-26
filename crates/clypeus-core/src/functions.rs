@@ -160,6 +160,9 @@ pub struct RunFunctionRequest {
     pub inputs: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Open reasoning level. Must match one of the effective model's
+    /// advertised levels verbatim; absent, empty, and `"default"` mean "no
+    /// explicit override" and anything else is forwarded to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_level: Option<String>,
 }
@@ -168,6 +171,8 @@ pub struct RunFunctionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FunctionDiagnosticsDto {
     pub model: String,
+    /// Reasoning level applied to the run; `"default"` when no explicit
+    /// override was requested.
     pub reasoning_level: String,
     pub duration_ms: i64,
     pub attempts: u32,
@@ -626,9 +631,7 @@ impl FunctionRunner {
             let completion = CompletionRequest {
                 model: model.clone(),
                 messages: messages.clone(),
-                reasoning: reasoning
-                    .as_deref()
-                    .and_then(crate::models::ReasoningLevel::parse),
+                reasoning: reasoning.clone(),
                 tools: Vec::new(),
                 tool_choice: ToolChoice::None,
                 max_output_tokens,
@@ -742,7 +745,8 @@ impl FunctionRunner {
             output,
             diagnostics: FunctionDiagnosticsDto {
                 model,
-                reasoning_level: reasoning.unwrap_or_else(|| "default".to_string()),
+                reasoning_level: reasoning
+                    .unwrap_or_else(|| crate::provider::DEFAULT_REASONING_LEVEL.to_string()),
                 duration_ms,
                 attempts,
                 usage,
@@ -922,23 +926,28 @@ pub fn select_model(
 
     let requested_reasoning = requested_reasoning
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    let reasoning = match requested_reasoning.as_deref() {
+        .filter(|value| !value.is_empty());
+    let reasoning = match requested_reasoning {
         None => {
             let default = capability.default_reasoning_level.trim();
-            if default.is_empty() || default.eq_ignore_ascii_case("default") {
+            if default.is_empty()
+                || default == crate::provider::DEFAULT_REASONING_LEVEL
+                || !capability
+                    .reasoning_levels
+                    .iter()
+                    .any(|candidate| candidate == default)
+            {
                 None
             } else {
                 Some(default.to_string())
             }
         }
-        Some("default") => None,
+        Some(level) if level == crate::provider::DEFAULT_REASONING_LEVEL => None,
         Some(level) => {
             if capability
                 .reasoning_levels
                 .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(level))
+                .any(|candidate| candidate == level)
             {
                 Some(level.to_string())
             } else {
@@ -1008,6 +1017,21 @@ mod tests {
                     reasoning_levels: vec!["medium".into()],
                     default_reasoning_level: "medium".into(),
                 },
+                ModelCapability {
+                    model: "open".into(),
+                    reasoning_levels: vec![
+                        "default".into(),
+                        "none".into(),
+                        "max".into(),
+                        "xhigh".into(),
+                    ],
+                    default_reasoning_level: "max".into(),
+                },
+                ModelCapability {
+                    model: "fixed".into(),
+                    reasoning_levels: Vec::new(),
+                    default_reasoning_level: String::new(),
+                },
             ],
         }
     }
@@ -1054,6 +1078,24 @@ mod tests {
         assert_eq!(error.code, "function_model_not_available");
         let error = select_model(&catalog(), None, Some("fast"), Some("ultra")).unwrap_err();
         assert_eq!(error.code, "function_reasoning_not_available");
+        assert!(error.detail.contains("'ultra'"));
+        assert!(error.detail.contains("'fast'"));
+    }
+
+    #[test]
+    fn select_model_accepts_arbitrary_catalog_spellings() {
+        let (_, reasoning) = select_model(&catalog(), None, Some("open"), Some("none")).unwrap();
+        assert_eq!(reasoning.as_deref(), Some("none"));
+
+        let (_, reasoning) = select_model(&catalog(), None, Some("open"), Some("max")).unwrap();
+        assert_eq!(reasoning.as_deref(), Some("max"));
+
+        let (_, reasoning) = select_model(&catalog(), None, Some("open"), Some("xhigh")).unwrap();
+        assert_eq!(reasoning.as_deref(), Some("xhigh"));
+
+        // Catalog values are matched case-sensitively and verbatim.
+        let error = select_model(&catalog(), None, Some("open"), Some("MAX")).unwrap_err();
+        assert_eq!(error.code, "function_reasoning_not_available");
     }
 
     #[test]
@@ -1062,13 +1104,33 @@ mod tests {
         assert_eq!(model, "smart");
         assert_eq!(reasoning.as_deref(), Some("medium"));
 
+        // A model advertising a custom default passes it through verbatim.
+        let (_, reasoning) = select_model(&catalog(), None, Some("open"), None).unwrap();
+        assert_eq!(reasoning.as_deref(), Some("max"));
+
         let (model, reasoning) =
             select_model(&catalog(), Some("missing"), None, Some("default")).unwrap();
         assert_eq!(model, "fast");
         assert!(reasoning.is_none());
 
-        let (_, reasoning) = select_model(&catalog(), None, Some("fast"), Some("HIGH")).unwrap();
+        let (_, reasoning) = select_model(&catalog(), None, Some("fast"), Some("high")).unwrap();
         assert_eq!(reasoning.as_deref(), Some("high"));
+
+        let (_, reasoning) = select_model(&catalog(), None, Some("open"), Some("default")).unwrap();
+        assert!(reasoning.is_none(), "the sentinel means no override");
+    }
+
+    #[test]
+    fn select_model_allows_only_default_for_empty_levels() {
+        let (_, reasoning) = select_model(&catalog(), None, Some("fixed"), None).unwrap();
+        assert!(reasoning.is_none());
+
+        let (_, reasoning) =
+            select_model(&catalog(), None, Some("fixed"), Some("default")).unwrap();
+        assert!(reasoning.is_none());
+
+        let error = select_model(&catalog(), None, Some("fixed"), Some("low")).unwrap_err();
+        assert_eq!(error.code, "function_reasoning_not_available");
     }
 
     #[test]
