@@ -65,9 +65,9 @@ pub use principal::{
 pub use profile::{ProfileSelection, ProfileStore, PromptProfile, StaticProfileStore};
 pub use provider::{
     AssistantOutcome, CompletionRequest, DEFAULT_REASONING_LEVEL, ModelCapability, ModelCatalog,
-    ProbeReport, Provider, ProviderConfig, ProviderError, ProviderRegistry, ProviderStream,
-    SseSplitter, StreamAccumulator, StreamDecoder, StreamDelta, ToolChoice, reasoning_override,
-    validate_base_url,
+    OUTPUT_NOT_AVAILABLE_CODE, OutputFormat, ProbeReport, Provider, ProviderConfig, ProviderError,
+    ProviderRegistry, ProviderStream, SseSplitter, StreamAccumulator, StreamDecoder, StreamDelta,
+    ToolChoice, reasoning_override, validate_base_url,
 };
 pub use rate_limit::{InMemoryRateLimiter, RateKey, RateLimitError, RateLimiter, RateSnapshot};
 pub use secrets::{SecretError, SecretStore, SecretString};

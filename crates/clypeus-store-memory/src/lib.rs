@@ -210,6 +210,7 @@ fn new_user_message(
         context_json: request.context_json.clone(),
         model: request.model.clone(),
         reasoning_level: request.reasoning_level.clone(),
+        output_format: request.output.clone(),
         status: MessageStatus::Complete,
         error_detail: None,
         usage: None,
@@ -480,6 +481,7 @@ impl ConversationStore for MemoryStore {
             context_json: request.context_json.clone(),
             model: request.model.clone(),
             reasoning_level: request.reasoning_level.clone(),
+            output_format: request.output.clone(),
             status: MessageStatus::Pending,
             error_detail: None,
             usage: None,
@@ -537,6 +539,7 @@ impl ConversationStore for MemoryStore {
         message.reasoning_content = finish.reasoning.map(str::to_string);
         message.status = finish.status;
         message.error_detail = finish.error_detail.map(str::to_string);
+        message.output_format = finish.output.clone();
         message.usage = finish.usage.cloned();
         message.updated_at = Utc::now();
         message.completed_at = Some(Utc::now());

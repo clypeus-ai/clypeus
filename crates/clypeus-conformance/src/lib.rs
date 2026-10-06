@@ -15,6 +15,7 @@ use clypeus_core::broker::{
 use clypeus_core::models::{ProviderKind, TokenUsage};
 use clypeus_core::principal::{Principal, ScopeId};
 use clypeus_core::profile::ProfileSelection;
+use clypeus_core::provider::OutputFormat;
 use clypeus_core::store::{
     ApprovalStore, AssistantFinish, BeginTurn, ConversationStore, CreateThread, MessageStatus,
     NewToolApproval, NewToolCall, ScopeSettingsStore, ScopeSettingsUpdate, StoreError,
@@ -165,6 +166,15 @@ where
     let scope = ScopeId::new(format!("conv-{}", Uuid::new_v4()));
     let other = ScopeId::new(format!("conv-{}", Uuid::new_v4()));
     let subject = "user-1";
+    let document = OutputFormat::JsonSchema {
+        name: "answer".into(),
+        schema: json!({
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"]
+        }),
+    };
+    let text = OutputFormat::Text;
 
     let thread = store
         .create_thread(
@@ -208,6 +218,7 @@ where
                 reasoning_level: Some("low".into()),
                 context_version: Some("ctx-1".into()),
                 context_json: Some(json!({"page": "home"})),
+                output: document.clone(),
             },
         )
         .await
@@ -234,9 +245,19 @@ where
             }),
             status: MessageStatus::Complete,
             error_detail: None,
+            output: &document,
         })
         .await
         .map_err(|error| backend("turn_finalize", error))?;
+    let finalized = store
+        .message(&scope, subject, first.assistant_message.id)
+        .await
+        .map_err(|error| backend("turn_finalize_get", error))?;
+    expect!(
+        "turn_output_format_round_trips",
+        finalized.output_format == document,
+        "the requested output format must survive begin and finalize"
+    );
 
     let second = store
         .begin_turn(
@@ -251,6 +272,7 @@ where
                 reasoning_level: None,
                 context_version: None,
                 context_json: None,
+                output: text.clone(),
             },
         )
         .await
@@ -270,6 +292,7 @@ where
             usage: None,
             status: MessageStatus::Complete,
             error_detail: None,
+            output: &text,
         })
         .await
         .map_err(|error| backend("turn_finalize_second", error))?;
@@ -316,6 +339,7 @@ where
                 reasoning_level: None,
                 context_version: None,
                 context_json: None,
+                output: text.clone(),
             },
         )
         .await
@@ -350,6 +374,7 @@ where
             usage: None,
             status: MessageStatus::Complete,
             error_detail: None,
+            output: &text,
         })
         .await
         .map_err(|error| backend("turn_finalize_edit", error))?;
@@ -383,6 +408,7 @@ where
                 reasoning_level: None,
                 context_version: None,
                 context_json: None,
+                output: text.clone(),
             },
         )
         .await
@@ -404,6 +430,7 @@ where
             usage: None,
             status: MessageStatus::Complete,
             error_detail: None,
+            output: &text,
         })
         .await
         .map_err(|error| backend("turn_finalize_regenerate", error))?;
@@ -469,6 +496,7 @@ where
                 reasoning_level: None,
                 context_version: None,
                 context_json: None,
+                output: text.clone(),
             },
         )
         .await
@@ -488,6 +516,7 @@ where
             }),
             status: MessageStatus::Stopped,
             error_detail: Some("client_disconnected"),
+            output: &text,
         })
         .await
         .map_err(|error| backend("stopped_turn_finalize", error))?;
@@ -538,6 +567,7 @@ where
                 reasoning_level: None,
                 context_version: None,
                 context_json: None,
+                output: text.clone(),
             },
         )
         .await
@@ -630,6 +660,11 @@ where
     let thread = Uuid::new_v4();
     let message = Uuid::new_v4();
     let call_id = format!("call-{}", Uuid::new_v4());
+    // Derived from the call rather than a constant. The approval table is keyed by the
+    // approval id alone, so a fixed one lets this contract pass once per database and
+    // collide on every run after the first — which is exactly how it failed the second
+    // time it was pointed at the same store.
+    let approval_id = format!("appr-{call_id}");
 
     store
         .record_tool_call(NewToolCall {
@@ -668,7 +703,7 @@ where
 
     store
         .insert_tool_approval(NewToolApproval {
-            id: "appr-1",
+            id: approval_id.as_str(),
             tool_call_id: &call_id,
             scope: &scope,
             subject,
@@ -681,7 +716,7 @@ where
         .await
         .map_err(|error| backend("approval_insert", error))?;
     store
-        .mark_tool_call_approved(&call_id, "appr-1")
+        .mark_tool_call_approved(&call_id, approval_id.as_str())
         .await
         .map_err(|error| backend("approval_mark_approved", error))?;
     expect!(
@@ -693,7 +728,7 @@ where
         "deciding an already-decided call must conflict"
     );
     store
-        .mark_tool_call_running(&call_id, Some("minted"), Some("appr-1"))
+        .mark_tool_call_running(&call_id, Some("minted"), Some(approval_id.as_str()))
         .await
         .map_err(|error| backend("approval_running", error))?;
     store
@@ -704,7 +739,7 @@ where
                 result_json: Some(&json!({"ok": true})),
                 error_code: None,
                 duration_ms: Some(5),
-                approval_id: Some("appr-1"),
+                approval_id: Some(approval_id.as_str()),
             },
         )
         .await
@@ -716,7 +751,8 @@ where
         .ok_or_else(|| ConformanceError::new("approval_get_final", "call must still exist"))?;
     expect!(
         "approval_terminal_state",
-        snapshot.status == "succeeded" && snapshot.approval_id.as_deref() == Some("appr-1"),
+        snapshot.status == "succeeded"
+            && snapshot.approval_id.as_deref() == Some(approval_id.as_str()),
         "completed call must keep its approval id"
     );
 

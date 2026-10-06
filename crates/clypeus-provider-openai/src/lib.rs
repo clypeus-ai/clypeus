@@ -378,6 +378,18 @@ pub fn build_payload(request: &CompletionRequest, stream: bool) -> Value {
             Value::String(request.tool_choice.as_wire().to_string()),
         );
     }
+    // Always strict: a schema a provider is free to ignore is a schema that turns a
+    // caller's hard requirement into a suggestion, and the failure would surface far from
+    // here as a parse error on an answer that looked successful.
+    if let clypeus_core::provider::OutputFormat::JsonSchema { name, schema } = &request.output {
+        payload.insert(
+            "response_format".into(),
+            json!({
+                "type": "json_schema",
+                "json_schema": {"name": name, "strict": true, "schema": schema},
+            }),
+        );
+    }
     payload.insert(
         "max_tokens".into(),
         Value::Number(serde_json::Number::from(request.max_output_tokens)),
@@ -865,6 +877,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: clypeus_core::provider::ToolChoice::None,
             max_output_tokens: 128,
+            output: clypeus_core::provider::OutputFormat::Text,
         }
     }
 

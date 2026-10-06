@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use clypeus_core::audit::AuditRecord;
 use clypeus_core::models::{ChatMessage, ProviderKind, TokenUsage, ToolSpec};
-use clypeus_core::provider::{ModelCatalog, ProbeReport};
+use clypeus_core::provider::{ModelCatalog, OutputFormat, ProbeReport};
 use clypeus_core::store::{
     Feedback, Message, MessageVersion, PersistedToolCall, ScopeSettings, Thread, ThreadView,
     ToolCallStatus, TurnUsage,
@@ -170,6 +170,9 @@ pub struct MessageDto {
     /// Reasoning level applied to this turn; `null` when no explicit override
     /// was requested.
     pub reasoning_level: Option<String>,
+    /// The shape this turn's answer was asked to take, recorded when the turn
+    /// began so a later resume can hold the provider to the same contract.
+    pub output_format: OutputFormat,
     pub status: String,
     pub error_detail: Option<String>,
     pub usage: Option<TokenUsage>,
@@ -197,6 +200,7 @@ impl From<Message> for MessageDto {
             context_json: message.context_json,
             model: message.model,
             reasoning_level: message.reasoning_level,
+            output_format: message.output_format,
             status: message.status.as_wire().to_string(),
             error_detail: message.error_detail,
             usage: message.usage,
@@ -329,6 +333,9 @@ pub struct CreateTurnRequest {
     pub content: String,
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text.
+    #[serde(default)]
+    pub output: OutputFormat,
     #[serde(default)]
     pub model: Option<String>,
     /// Open reasoning level. Must match one of the effective model's
@@ -347,6 +354,9 @@ pub struct EditTurnRequest {
     pub content: String,
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text.
+    #[serde(default)]
+    pub output: OutputFormat,
     #[serde(default)]
     pub model: Option<String>,
     /// Open reasoning level. Must match one of the effective model's
@@ -363,6 +373,9 @@ pub struct EditTurnRequest {
 pub struct RegenerateTurnRequest {
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text.
+    #[serde(default)]
+    pub output: OutputFormat,
     #[serde(default)]
     pub model: Option<String>,
     /// Open reasoning level. Must match one of the effective model's
@@ -503,6 +516,10 @@ pub struct CompletionsRequest {
     pub tool_choice: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text, which is what a model
+    /// produces unless it is told otherwise.
+    #[serde(default)]
+    pub output: OutputFormat,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

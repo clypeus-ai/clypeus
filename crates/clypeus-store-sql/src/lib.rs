@@ -15,6 +15,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use clypeus_core::models::{ChatMessage, ChatRole, ProviderKind, TokenUsage, ToolCall};
 use clypeus_core::principal::ScopeId;
 use clypeus_core::profile::ProfileSelection;
+use clypeus_core::provider::OutputFormat;
 use clypeus_core::store::{
     ApprovalStore, ApprovalView, AssistantFinish, BeginTurn, ConversationStore, CreateThread,
     Feedback, FeedbackRating, Message, MessageStatus, MessageVersion, NewToolApproval, NewToolCall,
@@ -256,6 +257,18 @@ fn parse_json(value: &str) -> Value {
     serde_json::from_str(value).unwrap_or(Value::Null)
 }
 
+/// Decodes the stored output format. Unlike free-form JSON columns there is no
+/// lossy fallback here: reading an unrecognizable format as text would silently
+/// drop a caller's document contract, so a malformed value is a store error.
+fn parse_output_format(value: &str) -> Result<OutputFormat, StoreError> {
+    serde_json::from_str(value)
+        .map_err(|error| StoreError::Backend(format!("output_format: {error}")))
+}
+
+fn serialize_output_format(output: &OutputFormat) -> Result<String, StoreError> {
+    serde_json::to_string(output).map_err(|error| StoreError::Backend(error.to_string()))
+}
+
 fn parse_status(value: &str) -> MessageStatus {
     MessageStatus::parse(value).unwrap_or(MessageStatus::Error)
 }
@@ -401,6 +414,7 @@ impl SqlStore {
             context_json: column_opt_text(row, "context_json")?.map(|raw| parse_json(&raw)),
             model: column_opt_text(row, "model")?,
             reasoning_level: column_opt_text(row, "reasoning_level")?,
+            output_format: parse_output_format(&column_text(row, "output_format")?)?,
             status: parse_status(&column_text(row, "status")?),
             error_detail: column_opt_text(row, "error_detail")?,
             usage,
@@ -1051,6 +1065,7 @@ impl ConversationStore for SqlStore {
             context_json: request.context_json.clone(),
             model: request.model.clone(),
             reasoning_level: request.reasoning_level.clone(),
+            output_format: request.output.clone(),
             status: MessageStatus::Pending,
             error_detail: None,
             usage: None,
@@ -1103,12 +1118,13 @@ impl ConversationStore for SqlStore {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let output_format = serialize_output_format(finish.output)?;
         let now = Utc::now();
         let affected = self
             .exec(
                 "UPDATE clypeus_messages SET
                     content = ?, reasoning_content = ?, status = ?, error_detail = ?,
-                    usage_json = ?, updated_at = ?, completed_at = ?
+                    usage_json = ?, output_format = ?, updated_at = ?, completed_at = ?
                  WHERE id = ? AND scope_id = ? AND subject = ? AND role = 'assistant'",
                 vec![
                     finish.content.into(),
@@ -1116,6 +1132,7 @@ impl ConversationStore for SqlStore {
                     finish.status.as_wire().into(),
                     finish.error_detail.into(),
                     usage.into(),
+                    output_format.into(),
                     timestamp(now).into(),
                     timestamp(now).into(),
                     finish.message_id.to_string().into(),
@@ -1509,6 +1526,7 @@ struct MessageBase {
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     context_json: Option<Value>,
+    output_format: OutputFormat,
 }
 
 impl MessageBase {
@@ -1526,6 +1544,7 @@ impl MessageBase {
             context_json: self.context_json,
             model: None,
             reasoning_level: None,
+            output_format: self.output_format,
             status: MessageStatus::Complete,
             error_detail: None,
             usage: None,
@@ -1553,6 +1572,7 @@ fn message_base_from_row(row: &AnyRow) -> Result<MessageBase, StoreError> {
         started_at: parse_opt_timestamp(column_opt_text(row, "started_at")?)?,
         completed_at: parse_opt_timestamp(column_opt_text(row, "completed_at")?)?,
         context_json: column_opt_text(row, "context_json")?.map(|raw| parse_json(&raw)),
+        output_format: parse_output_format(&column_text(row, "output_format")?)?,
     })
 }
 
@@ -1576,6 +1596,7 @@ fn new_user_message(
         context_json: request.context_json.clone(),
         model: request.model.clone(),
         reasoning_level: request.reasoning_level.clone(),
+        output_format: request.output.clone(),
         status: MessageStatus::Complete,
         error_detail: None,
         usage: None,
@@ -1593,9 +1614,9 @@ fn message_insert_sql() -> &'static str {
     "INSERT INTO clypeus_messages (
         id, thread_id, scope_id, subject, parent_message_id, role, content,
         reasoning_content, tool_call_id, context_version, context_json, model,
-        reasoning_level, status, error_detail, usage_json, version, created_at,
-        updated_at, started_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        reasoning_level, output_format, status, error_detail, usage_json, version,
+        created_at, updated_at, started_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 }
 
 async fn sibling_version_in_tx(
@@ -1667,6 +1688,7 @@ fn message_values(
             .into(),
         message.model.clone().into(),
         message.reasoning_level.clone().into(),
+        serialize_output_format(&message.output_format)?.into(),
         message.status.as_wire().into(),
         message.error_detail.clone().into(),
         message

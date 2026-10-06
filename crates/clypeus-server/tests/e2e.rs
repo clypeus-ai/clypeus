@@ -40,6 +40,7 @@ struct MockState {
     mode: MockMode,
     calls: std::sync::atomic::AtomicUsize,
     last_reasoning_effort: std::sync::Mutex<Option<Value>>,
+    last_response_format: std::sync::Mutex<Option<Value>>,
 }
 
 async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
@@ -47,6 +48,7 @@ async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
         mode,
         calls: std::sync::atomic::AtomicUsize::new(0),
         last_reasoning_effort: std::sync::Mutex::new(None),
+        last_response_format: std::sync::Mutex::new(None),
     });
     let router = Router::new()
         .route("/v1/models", get(mock_models))
@@ -140,6 +142,7 @@ async fn mock_chat(
         .calls
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     *state.last_reasoning_effort.lock().expect("lock") = body.get("reasoning_effort").cloned();
+    *state.last_response_format.lock().expect("lock") = body.get("response_format").cloned();
     let has_tool_result = body
         .get("messages")
         .and_then(Value::as_array)
@@ -612,6 +615,73 @@ async fn approval_allow_executes_once_and_replay_is_refused() {
     );
     let replay: Value = replay.json().await.unwrap();
     assert_eq!(replay["code"], "tool_approval_replayed");
+}
+
+#[tokio::test]
+async fn approval_resume_keeps_the_requested_output_format() {
+    let harness = harness(MockMode::ApprovalTool).await;
+    let thread = harness.create_thread().await;
+    let output = json!({
+        "type": "json_schema",
+        "name": "record_result",
+        "schema": {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": false
+        }
+    });
+    let response = harness
+        .post(
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"content": "create a record", "stream": false, "output": output}),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "turn: {:?}", response.text().await);
+    let turn: Value = response.json().await.unwrap();
+    assert_eq!(turn["assistantMessage"]["status"], "awaiting_approval");
+    assert_eq!(
+        turn["assistantMessage"]["outputFormat"], output,
+        "the requested format must be persisted and served back"
+    );
+    let expected_payload = json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "record_result",
+            "strict": true,
+            "schema": output["schema"].clone()
+        }
+    });
+    assert_eq!(
+        *harness.mock.last_response_format.lock().unwrap(),
+        Some(expected_payload.clone()),
+        "the parked turn asked the provider for the document"
+    );
+
+    let call = &turn["assistantMessage"]["toolCalls"][0];
+    let hash = call["approval"]["argumentsHash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let call_id = call["id"].as_str().unwrap().to_string();
+    let allowed = harness
+        .post(
+            &format!("/v1/tool-calls/{call_id}/approvals"),
+            json!({"decision": "allow", "argumentsHash": hash, "stream": false}),
+        )
+        .await;
+    assert_eq!(allowed.status(), 200, "allow: {:?}", allowed.text().await);
+    let resumed: Value = allowed.json().await.unwrap();
+    assert_eq!(resumed["assistantMessage"]["status"], "complete");
+    assert_eq!(
+        resumed["assistantMessage"]["outputFormat"], output,
+        "the format must survive the approval resume"
+    );
+    assert_eq!(
+        *harness.mock.last_response_format.lock().unwrap(),
+        Some(expected_payload),
+        "the approval request never saw the schema; the resumed turn must still ask for it"
+    );
 }
 
 #[tokio::test]

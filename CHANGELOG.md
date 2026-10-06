@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+Callers can request a JSON document that conforms to a schema.
+
+### Added
+
+* `clypeus-core`: `OutputFormat` (`Text`, the default, or `JsonSchema { name,
+  schema }`) carried on `CompletionRequest::output` and `TurnRequest::output`,
+  and `ProviderError::UnsupportedOutput` with the stable code
+  `provider_output_not_available` for a provider that cannot constrain
+  decoding. `AiFunction` runs ask the provider for the function's own
+  `output_schema()`.
+* `clypeus-provider-openai`: sends a requested schema as a strict
+  `response_format`:
+  `{"type":"json_schema","json_schema":{"name":...,"strict":true,"schema":...}}`.
+  `clypeus-provider-anthropic` returns `UnsupportedOutput`, because the
+  Messages API has no field for it.
+* The requested format is stored on the assistant message row
+  (`clypeus_messages.output_format`, migration `0002_message_output_format.sql`,
+  `NOT NULL DEFAULT '{"type":"text"}'` in both SQL stores), so a turn that
+  parks for a tool approval is resumed with the format of the original
+  request, which the resuming request never saw.
+* `POST /v1/completions`, `POST /v1/threads/{id}/messages`,
+  `PATCH /v1/messages/{id}` and `POST /v1/messages/{id}/regenerate` accept an
+  `output` field (absent means free text); `MessageDto` exposes
+  `outputFormat`.
+
 ## [1.2.0] - 2026-09-27
 
 Cancelled turns become a first-class terminal state with an explicit stop.

@@ -273,6 +273,7 @@ pub async fn completions(
             .max_output_tokens
             .unwrap_or(settings.max_output_tokens)
             .clamp(1, settings.max_output_tokens.max(1)),
+        output: request.output.clone(),
     };
 
     if request.stream {
@@ -440,6 +441,7 @@ pub async fn create_message(
             model: request.model,
             reasoning_level: request.reasoning_level,
             page_context: request.page_context.map(|context| context.to_value()),
+            output: request.output,
         },
     )
     .await
@@ -467,6 +469,7 @@ pub async fn edit_message(
             model: request.model,
             reasoning_level: request.reasoning_level,
             page_context: request.page_context.map(|context| context.to_value()),
+            output: request.output,
         },
     )
     .await
@@ -494,6 +497,7 @@ pub async fn regenerate_message(
             model: request.model,
             reasoning_level: request.reasoning_level,
             page_context: request.page_context.map(|context| context.to_value()),
+            output: request.output,
         },
     )
     .await
@@ -611,6 +615,7 @@ struct TurnPlan {
     model: Option<String>,
     reasoning_level: Option<String>,
     page_context: Option<Value>,
+    output: clypeus_core::provider::OutputFormat,
 }
 
 async fn run_turn(
@@ -648,6 +653,7 @@ async fn run_turn(
         context
     };
     let context_json = serde_json::to_value(&context).ok();
+    let plan_output = plan.output.clone();
     let profile_prompt = profile_prompt(state.prompt_profile.as_deref(), &settings.profile);
     let system = clypeus_core::context::build_system_message(profile_prompt.as_deref(), &context);
 
@@ -665,6 +671,7 @@ async fn run_turn(
                 reasoning_level: reasoning.clone(),
                 context_version: Some(context.version.clone()),
                 context_json,
+                output: plan_output.clone(),
             },
         )
         .await?;
@@ -702,6 +709,7 @@ async fn run_turn(
         assistant_message_id: started.assistant_message.id,
         context,
         limits,
+        output: plan_output,
     };
 
     if plan.stream {

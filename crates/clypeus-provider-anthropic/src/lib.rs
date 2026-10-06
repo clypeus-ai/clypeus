@@ -334,6 +334,19 @@ fn has_reasoning(request: &CompletionRequest) -> bool {
 
 /// Builds the Messages payload.
 pub fn build_payload(request: &CompletionRequest, stream: bool) -> Result<Value, ProviderError> {
+    // Refused, not dropped. The Messages API has no field this adapter can put a schema
+    // in, and a request that asked for a document and silently received prose would fail
+    // somewhere far from here — as a parse error on an answer that looked successful.
+    // Making the capability work means expressing the schema as a forced tool call, which
+    // changes what the answer *is*; that is a change with its own design, not a line here.
+    if matches!(
+        request.output,
+        clypeus_core::provider::OutputFormat::JsonSchema { .. }
+    ) {
+        return Err(ProviderError::UnsupportedOutput {
+            model: request.model.clone(),
+        });
+    }
     let mut payload = Map::new();
     payload.insert("model".into(), Value::String(request.model.clone()));
     payload.insert(
@@ -689,6 +702,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: clypeus_core::provider::ToolChoice::None,
             max_output_tokens: 256,
+            output: clypeus_core::provider::OutputFormat::Text,
         }
     }
 

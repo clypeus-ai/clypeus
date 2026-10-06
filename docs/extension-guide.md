@@ -126,6 +126,15 @@ let broker = Arc::new(ToolBroker::new(
 let orchestrator = Orchestrator::new(providers, conversations, broker, Arc::new(NeutralGuardPolicy));
 ```
 
+`providers` is a `ProviderRegistry`. A custom `Provider` owns its model
+catalog, probe, and buffered and streamed completions, and must honor
+`CompletionRequest::output`: when the request asks for a JSON document, the
+provider constrains decoding to the given schema (the OpenAI-compatible
+adapter sends it as a strict `response_format`). A provider whose protocol
+cannot express that constraint returns `ProviderError::UnsupportedOutput`
+rather than ignoring the field and leaving the caller to discover the
+mismatch.
+
 Embedders that serve HTTP without the standalone binary can reuse
 `clypeus-server::app` with a fully custom `AppState`; the standalone server is
 a reference composition, not a requirement.

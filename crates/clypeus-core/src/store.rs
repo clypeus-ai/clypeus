@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::models::{ChatMessage, ProviderKind, TokenUsage};
 use crate::principal::ScopeId;
 use crate::profile::ProfileSelection;
+use crate::provider::OutputFormat;
 
 /// Readiness probe contract. `Err` is a dependency failure with a safe detail
 /// string.
@@ -302,6 +303,10 @@ pub struct Message {
     pub context_json: Option<Value>,
     pub model: Option<String>,
     pub reasoning_level: Option<String>,
+    /// The shape this turn's answer was asked to take. Recorded when the turn
+    /// began so that a resume, which never sees the original request, can still
+    /// hold the provider to the same contract.
+    pub output_format: OutputFormat,
     pub status: MessageStatus,
     pub error_detail: Option<String>,
     pub usage: Option<TokenUsage>,
@@ -349,6 +354,7 @@ pub struct BeginTurn {
     pub reasoning_level: Option<String>,
     pub context_version: Option<String>,
     pub context_json: Option<Value>,
+    pub output: OutputFormat,
 }
 
 /// Message pair created by [`ConversationStore::begin_turn`].
@@ -370,6 +376,11 @@ pub struct AssistantFinish<'a> {
     pub usage: Option<&'a TokenUsage>,
     pub status: MessageStatus,
     pub error_detail: Option<&'a str>,
+    /// The shape the answer was asked to take. The row already carries it from
+    /// [`ConversationStore::begin_turn`]; repeating it here keeps every
+    /// terminal write, including the abandoned-turn guard, explicit about the
+    /// contract instead of silently leaving the stored value unverified.
+    pub output: &'a OutputFormat,
 }
 
 /// Usage report for one thread.

@@ -88,6 +88,7 @@ use utoipa::OpenApi;
         clypeus_core::models::ToolSpec,
         clypeus_core::models::ToolCall,
         clypeus_core::provider::ModelCapability,
+        clypeus_core::provider::OutputFormat,
         clypeus_core::profile::ProfileSelection,
     ))
 )]

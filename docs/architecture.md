@@ -32,6 +32,13 @@ One turn is a bounded loop:
    /v1/messages/{id}/stop` or a dropped stream consumer). A stopped turn is
    terminal: partial content, reasoning, and usage are persisted as streamed.
 
+Opening a turn records the request metadata a later request cannot
+reconstruct — the model, the reasoning level, the context snapshot, and the
+output format — on the assistant row. The output format is persisted rather
+than held in memory because a turn that parks for a tool approval is resumed
+by a later HTTP request that never saw the original one, and the resumed turn
+must still end in the document it was asked for.
+
 Budgets: 4 tool rounds, 8 tool calls, 64 KiB of projected result bytes, and a
 90-second turn budget by default (`CLYPEUS_*` overrides).
 
