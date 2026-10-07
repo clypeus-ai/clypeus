@@ -5,7 +5,8 @@ Keep a Changelog and the project adheres to Semantic Versioning.
 
 ## [Unreleased]
 
-Callers can request a JSON document that conforms to a schema.
+Callers can request a JSON document that conforms to a schema. A model's
+protocol and a provider rate limit each get an answer of their own.
 
 ### Added
 
@@ -15,6 +16,26 @@ Callers can request a JSON document that conforms to a schema.
   `provider_output_not_available` for a provider that cannot constrain
   decoding. `AiFunction` runs ask the provider for the function's own
   `output_schema()`.
+* `clypeus-core`: `ProviderError::UnsupportedProtocol { model }` with the
+  stable code `provider_protocol_not_available`, for a gateway that does not
+  serve a model on the requested protocol. The OpenAI adapters produce it from
+  the gateway's structured `ModelProtocolUnsupported` error type, never from
+  the prose beside it: the measured message names no model, so the request's
+  own model is what the refusal carries. `ProviderError::response_error`
+  classifies a non-success response in one place.
+* `clypeus-core`: `ProviderError::RateLimited { retry_after_secs }` with the
+  stable code `provider_rate_limited`. Every bundled adapter reads
+  `Retry-After` from the response headers on a `429` — the header only, never
+  the prose in the body — and a rate limit no longer arrives as
+  `ProviderError::Upstream`. `FunctionRunError::retry_after_secs` and
+  `FunctionRunErrorKind::RateLimited` carry it out of the runner.
+* `clypeus-core`: `FunctionRunner` treats a protocol refusal as a discovery
+  rather than a permanent failure. When a provider says a model is not served
+  on its protocol and the registry has the other OpenAI wire shape, the runner
+  asks that one, records the switch in the audit log (`protocol_switched`) and
+  the metrics (`protocol_unsupported`), and remembers the model's protocol
+  keyed by base URL and model, alongside the runner's catalog cache, so the
+  refused first request is paid once per process rather than once per call.
 * `clypeus-provider-openai`: sends a requested schema as a strict
   `response_format`:
   `{"type":"json_schema","json_schema":{"name":...,"strict":true,"schema":...}}`.
@@ -45,8 +66,9 @@ Callers can request a JSON document that conforms to a schema.
   (`GET`/`PUT /admin/v1/scopes/{scope}/settings`) accepts and returns
   `headers` as `[{"name": ..., "value": ...}]`.
 * `ProviderKind::OpenaiResponses` (`openai_responses`) selects the new
-  backend. The standalone server registers it, and `CLYPEUS_SEED_PROVIDER`
-  accepts its spellings.
+  backend, and `ProviderKind::alternate_protocol` names the other OpenAI wire
+  shape of the same service (or `None` for Anthropic). The standalone server
+  registers it, and `CLYPEUS_SEED_PROVIDER` accepts its spellings.
 * The requested format is stored on the assistant message row
   (`clypeus_messages.output_format`, migration `0002_message_output_format.sql`,
   `NOT NULL DEFAULT '{"type":"text"}'` in both SQL stores), so a turn that
@@ -56,6 +78,15 @@ Callers can request a JSON document that conforms to a schema.
   `PATCH /v1/messages/{id}` and `POST /v1/messages/{id}/regenerate` accept an
   `output` field (absent means free text); `MessageDto` exposes
   `outputFormat`.
+
+### Changed
+
+* A provider `429` is `ProviderError::RateLimited` and a function run's
+  `RateLimited` outcome carries the wait the provider stated. The
+  `Upstream { status: 429 }` spelling is no longer produced by the bundled
+  adapters, and the standalone server maps the variant to `429` with
+  `provider_rate_limited`.
+
 
 ## [1.2.0] - 2026-09-27
 

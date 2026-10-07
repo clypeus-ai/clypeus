@@ -452,6 +452,10 @@ pub struct FunctionRunError {
     pub kind: FunctionRunErrorKind,
     pub code: &'static str,
     pub detail: String,
+    /// The wait the provider asked for, when the failure is a rate limit and
+    /// the provider stated one. `None` when no wait was stated, or when the
+    /// failure is not a rate limit.
+    pub retry_after_secs: Option<u64>,
 }
 
 impl FunctionRunError {
@@ -460,6 +464,7 @@ impl FunctionRunError {
             kind: FunctionRunErrorKind::Invalid,
             code: error.code,
             detail: error.detail,
+            retry_after_secs: None,
         }
     }
 
@@ -468,6 +473,7 @@ impl FunctionRunError {
             kind: FunctionRunErrorKind::Unavailable,
             code: "function_unavailable",
             detail: detail.into(),
+            retry_after_secs: None,
         }
     }
 
@@ -476,14 +482,30 @@ impl FunctionRunError {
             kind: FunctionRunErrorKind::RateLimited,
             code: "function_rate_limited",
             detail: "Too many AI requests; try again shortly.".into(),
+            retry_after_secs: None,
         }
     }
 
-    fn upstream(error: &ProviderError) -> Self {
-        Self {
-            kind: FunctionRunErrorKind::Upstream,
-            code: error.code(),
-            detail: error.safe_message(),
+    /// Maps a provider failure onto the run outcome the caller acts on.
+    ///
+    /// A rate limit keeps its own kind and the wait the provider stated, because
+    /// it is the one provider refusal a caller can act on other than by giving
+    /// up. Everything else keeps the provider's stable code and is an upstream
+    /// failure.
+    fn provider(error: &ProviderError) -> Self {
+        match error {
+            ProviderError::RateLimited { retry_after_secs } => Self {
+                kind: FunctionRunErrorKind::RateLimited,
+                code: error.code(),
+                detail: error.safe_message(),
+                retry_after_secs: *retry_after_secs,
+            },
+            _ => Self {
+                kind: FunctionRunErrorKind::Upstream,
+                code: error.code(),
+                detail: error.safe_message(),
+                retry_after_secs: None,
+            },
         }
     }
 }
@@ -520,6 +542,17 @@ struct ProviderTarget {
     default_max_output_tokens: i32,
 }
 
+/// One failed provider call, grouped so the run record's write path takes the
+/// facts it needs without a long positional argument list.
+struct ProviderFailure<'a> {
+    principal: &'a Principal,
+    function: &'a str,
+    inputs: &'a Value,
+    model: &'a str,
+    provider: &'a str,
+    error: &'a ProviderError,
+}
+
 /// Runs registered functions against configured providers.
 pub struct FunctionRunner {
     providers: Arc<ProviderRegistry>,
@@ -533,6 +566,13 @@ pub struct FunctionRunner {
     /// Allows provider base URLs that resolve to private addresses.
     allow_private_targets: bool,
     catalog_cache: std::sync::Mutex<HashMap<String, (Instant, Arc<crate::provider::ModelCatalog>)>>,
+    /// Which protocol a model answered on, learned when a gateway refused it on
+    /// the configured one. Keyed by base URL and model: one service serves a
+    /// model on one protocol for every scope that asks, and the same model name
+    /// on another gateway is no evidence about this one. Like the catalog cache
+    /// above, it is a per-process memory of a live service rather than
+    /// configuration a person wrote.
+    protocol_cache: std::sync::Mutex<HashMap<String, ProviderKind>>,
 }
 
 impl std::fmt::Debug for FunctionRunner {
@@ -566,6 +606,7 @@ impl FunctionRunner {
             catalog_ttl: Duration::from_secs(60),
             allow_private_targets: false,
             catalog_cache: std::sync::Mutex::new(HashMap::new()),
+            protocol_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -655,6 +696,18 @@ impl FunctionRunner {
         // text: a provider that refused once will refuse again.
         let mut without_schema = false;
 
+        // Which protocol serves this model is discovered, not configured. A provider
+        // that does not serve it says so, and the other wire shape of the same service
+        // is asked instead. A previous call's answer starts this one, so the one wasted
+        // request is paid once per process rather than once per call. The same shape as
+        // the schema refusal below: a refusal recognised once, retried in the other
+        // form, and recorded rather than silent.
+        let configured_kind = target.provider_kind;
+        let mut active_kind = self
+            .protocol_hint(configured_kind, &target.config.base_url, &model)
+            .unwrap_or(configured_kind);
+        let mut tried_kinds = vec![active_kind];
+
         let (output, diagnostics, usage) = loop {
             attempts += 1;
             let completion = CompletionRequest {
@@ -677,10 +730,10 @@ impl FunctionRunner {
                     without_schema,
                 ),
             };
-            let provider = target.provider_kind.as_wire();
+            let provider = active_kind.as_wire();
             let outcome = match self
                 .providers
-                .get(target.provider_kind)
+                .get(active_kind)
                 .ok_or_else(|| {
                     FunctionRunError::unavailable("Provider backend is not configured.")
                 })?
@@ -721,32 +774,55 @@ impl FunctionRunner {
                     attempts -= 1;
                     continue;
                 }
+                // The provider named the condition: this model is not served on this
+                // protocol. Ask the other wire shape of the same service, and remember
+                // the answer so a later call starts there. Only ever one switch: the
+                // alternate refusing too is an ordinary upstream failure, not a reason
+                // to ask the same two providers again.
                 Err(error) => {
-                    metrics::record_provider_request(provider, error.code());
-                    // The whole error, not the sentence the caller is given. A provider's
-                    // refusal carries the status and the provider's own words about what
-                    // it did not like, and collapsing that into "the provider rejected the
-                    // request" before anything writes it down leaves an operator with no
-                    // way to tell a wrong model from a wrong schema from a bad key. The
-                    // sentence stays what a person is shown; this is what an operator
-                    // reads.
-                    tracing::warn!(
-                        function = function.name(),
-                        %model,
-                        provider,
-                        error = ?error,
-                        "the provider refused a function run"
-                    );
-                    self.audit_function(
-                        principal,
-                        function.name(),
-                        &inputs,
-                        "upstream_failed",
-                        0,
-                        started.elapsed().as_millis() as i64,
-                    )
-                    .await;
-                    return Err(FunctionRunError::upstream(&error));
+                    if matches!(error, ProviderError::UnsupportedProtocol { .. })
+                        && let Some(alternate) = self.alternate_protocol(active_kind, &tried_kinds)
+                    {
+                        metrics::record_provider_request(provider, "protocol_unsupported");
+                        tracing::warn!(
+                            function = function.name(),
+                            %model,
+                            from = provider,
+                            to = alternate.as_wire(),
+                            "the provider does not serve the model on this protocol; asking the other"
+                        );
+                        self.audit_function(
+                            principal,
+                            function.name(),
+                            &inputs,
+                            "protocol_switched",
+                            0,
+                            started.elapsed().as_millis() as i64,
+                        )
+                        .await;
+                        self.remember_protocol(&target.config.base_url, &model, alternate);
+                        tried_kinds.push(active_kind);
+                        active_kind = alternate;
+                        // Not one of the answer attempts, for the same reason the schema
+                        // refusal above is not one: nothing was asked that the model
+                        // answered badly, and the negotiation must not shorten the
+                        // repair budget.
+                        attempts -= 1;
+                        continue;
+                    }
+                    return Err(self
+                        .provider_failure(
+                            ProviderFailure {
+                                principal,
+                                function: function.name(),
+                                inputs: &inputs,
+                                model: &model,
+                                provider,
+                                error: &error,
+                            },
+                            started,
+                        )
+                        .await);
                 }
             };
 
@@ -934,9 +1010,97 @@ impl FunctionRunner {
             }
             Err(error) => {
                 metrics::record_provider_request(target.provider_kind.as_wire(), error.code());
-                Err(FunctionRunError::upstream(&error))
+                Err(FunctionRunError::provider(&error))
             }
         }
+    }
+
+    /// The protocol a model was last seen to answer on, when it is not the
+    /// configured one.
+    ///
+    /// Keyed by base URL and model: one service serves a model on one protocol
+    /// for every scope that asks, and the same model name on another gateway is
+    /// no evidence about this one.
+    fn protocol_hint(
+        &self,
+        configured: ProviderKind,
+        base_url: &str,
+        model: &str,
+    ) -> Option<ProviderKind> {
+        let cache = self
+            .protocol_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remembered = *cache.get(&protocol_cache_key(base_url, model))?;
+        (remembered != configured && self.providers.get(remembered).is_some()).then_some(remembered)
+    }
+
+    /// Records which protocol answered for a model, so the first, refused
+    /// request is paid once per process rather than once per call.
+    fn remember_protocol(&self, base_url: &str, model: &str, kind: ProviderKind) {
+        self.protocol_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(protocol_cache_key(base_url, model), kind);
+    }
+
+    /// The other protocol of the same service that this run has not tried yet.
+    fn alternate_protocol(
+        &self,
+        active: ProviderKind,
+        tried: &[ProviderKind],
+    ) -> Option<ProviderKind> {
+        active
+            .alternate_protocol()
+            .filter(|kind| !tried.contains(kind))
+            .filter(|kind| self.providers.get(*kind).is_some())
+    }
+
+    /// Records one provider failure and turns it into the run error the caller
+    /// gets.
+    ///
+    /// The whole error goes to the log, not the sentence the caller is given: a
+    /// provider's refusal carries the status and the provider's own words about
+    /// what it did not like, and collapsing that before anything writes it down
+    /// leaves an operator with no way to tell a wrong model from a wrong schema
+    /// from a bad key. The sentence stays what a person is shown; this is what an
+    /// operator reads.
+    async fn provider_failure(
+        &self,
+        failure: ProviderFailure<'_>,
+        started: Instant,
+    ) -> FunctionRunError {
+        let ProviderFailure {
+            principal,
+            function,
+            inputs,
+            model,
+            provider,
+            error,
+        } = failure;
+        metrics::record_provider_request(provider, error.code());
+        tracing::warn!(
+            function,
+            model,
+            provider,
+            error = ?error,
+            "the provider refused a function run"
+        );
+        let outcome = if matches!(error, ProviderError::RateLimited { .. }) {
+            "rate_limited"
+        } else {
+            "upstream_failed"
+        };
+        self.audit_function(
+            principal,
+            function,
+            inputs,
+            outcome,
+            0,
+            started.elapsed().as_millis() as i64,
+        )
+        .await;
+        FunctionRunError::provider(error)
     }
 
     async fn audit_function(
@@ -980,6 +1144,12 @@ impl FunctionRunner {
             tracing::error!(%error, function = function_name, "failed to append function audit record");
         }
     }
+}
+
+/// Cache key for the protocol a model answered on: one service (its base URL)
+/// plus one model.
+fn protocol_cache_key(base_url: &str, model: &str) -> String {
+    format!("{base_url}|{model}")
 }
 
 /// Selects a catalog-advertised model and reasoning level.
@@ -1291,5 +1461,372 @@ mod tests {
         assert!(registry.is_empty());
         assert!(registry.get("anything").is_none());
         assert_eq!(registry.descriptors_for(&[]).len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Runner negotiation
+    // -----------------------------------------------------------------------
+
+    use crate::audit::AuditRecord;
+    use crate::guard::NeutralGuardPolicy;
+    use crate::profile::ProfileSelection;
+    use crate::provider::{AssistantOutcome, ProbeReport, Provider, ProviderStream};
+    use crate::rate_limit::{InMemoryRateLimiter, RateLimitConfig};
+    use crate::secrets::{SecretError, SecretString};
+    use crate::store::{ScopeSettings, ScopeSettingsUpdate, StoreError};
+
+    /// A provider that answers from a script and remembers what it was asked.
+    /// No HTTP: the runner's negotiation is the thing under test, and a fake
+    /// isolates it from the adapters on both ends.
+    struct ScriptedProvider {
+        id: &'static str,
+        answer: Result<AssistantOutcome, ProviderError>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(id: &'static str, answer: Result<AssistantOutcome, ProviderError>) -> Self {
+            Self {
+                id,
+                answer,
+                asked: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        async fn catalog(&self, _config: &ProviderConfig) -> Result<ModelCatalog, ProviderError> {
+            Ok(scripted_catalog())
+        }
+
+        async fn probe(&self, _config: &ProviderConfig) -> ProbeReport {
+            ProbeReport {
+                succeeded: true,
+                model_count: Some(1),
+                elapsed_ms: 0,
+                checked_at_utc: chrono::Utc::now(),
+                error: None,
+            }
+        }
+
+        async fn complete(
+            &self,
+            _config: &ProviderConfig,
+            request: CompletionRequest,
+        ) -> Result<AssistantOutcome, ProviderError> {
+            self.asked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.model);
+            self.answer.clone()
+        }
+
+        async fn stream(
+            &self,
+            _config: &ProviderConfig,
+            _request: CompletionRequest,
+        ) -> Result<ProviderStream, ProviderError> {
+            Err(ProviderError::EmptyResponse)
+        }
+    }
+
+    /// A function whose output is whatever text the provider returned, so a
+    /// scripted answer never has to be shaped like a real generation.
+    struct ScriptedFunction;
+
+    impl AiFunction for ScriptedFunction {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn description(&self) -> &'static str {
+            "scripted test function"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "additionalProperties": false, "properties": {}})
+        }
+
+        fn output_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn system_prompt(&self) -> &'static str {
+            "Return the answer."
+        }
+
+        fn validate_input(&self, raw: &Value) -> Result<Value, FunctionError> {
+            Ok(raw.clone())
+        }
+
+        fn compose_input(&self, _inputs: &Value) -> Result<String, FunctionError> {
+            Ok("ask".to_owned())
+        }
+
+        fn guarded_fields(&self, _inputs: &Value) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn validate_output(&self, raw: &str, _inputs: &Value) -> Result<Value, FunctionError> {
+            Ok(json!({"text": raw}))
+        }
+    }
+
+    struct FixedSettings(ScopeSettings);
+
+    #[async_trait::async_trait]
+    impl ScopeSettingsStore for FixedSettings {
+        async fn get(&self, _scope: &ScopeId) -> Result<Option<ScopeSettings>, StoreError> {
+            Ok(Some(self.0.clone()))
+        }
+
+        async fn upsert(
+            &self,
+            _scope: &ScopeId,
+            _update: ScopeSettingsUpdate,
+        ) -> Result<ScopeSettings, StoreError> {
+            Err(StoreError::Backend(
+                "the test does not write settings".into(),
+            ))
+        }
+    }
+
+    struct FixedSecrets;
+
+    #[async_trait::async_trait]
+    impl SecretStore for FixedSecrets {
+        async fn get(
+            &self,
+            _scope: &ScopeId,
+            _key: &str,
+        ) -> Result<Option<SecretString>, SecretError> {
+            Ok(Some(SecretString::new("test-key")))
+        }
+
+        async fn put(
+            &self,
+            _scope: &ScopeId,
+            _key: &str,
+            _value: SecretString,
+        ) -> Result<(), SecretError> {
+            Ok(())
+        }
+
+        async fn delete(&self, _scope: &ScopeId, _key: &str) -> Result<(), SecretError> {
+            Ok(())
+        }
+    }
+
+    struct SilentAudit;
+
+    #[async_trait::async_trait]
+    impl AuditSink for SilentAudit {
+        async fn append(&self, _record: AuditRecord) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
+
+    fn ready_outcome() -> AssistantOutcome {
+        AssistantOutcome {
+            content: "answer".to_owned(),
+            ..AssistantOutcome::default()
+        }
+    }
+
+    fn scripted_catalog() -> ModelCatalog {
+        ModelCatalog {
+            models: vec![ModelCapability {
+                model: "longcat".to_owned(),
+                reasoning_levels: Vec::new(),
+                default_reasoning_level: String::new(),
+            }],
+        }
+    }
+
+    fn scripted_settings(kind: ProviderKind) -> ScopeSettings {
+        ScopeSettings {
+            provider_kind: kind,
+            base_url: Some("https://gateway.example".to_owned()),
+            default_model: Some("longcat".to_owned()),
+            timeout_ms: 60_000,
+            max_output_tokens: 512,
+            api_key_present: true,
+            headers: Vec::new(),
+            profile: ProfileSelection::Disabled,
+            extensions: json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    fn scripted_runner(providers: ProviderRegistry, kind: ProviderKind) -> FunctionRunner {
+        FunctionRunner::new(
+            Arc::new(providers),
+            Arc::new(FixedSettings(scripted_settings(kind))),
+            Arc::new(FixedSecrets),
+            Arc::new(SilentAudit),
+            Arc::new(InMemoryRateLimiter::new(RateLimitConfig::default())),
+            Arc::new(NeutralGuardPolicy),
+        )
+        .with_catalog_ttl(Duration::ZERO)
+    }
+
+    fn scripted_request() -> RunFunctionRequest {
+        RunFunctionRequest {
+            inputs: json!({}),
+            model: Some("longcat".to_owned()),
+            reasoning_level: None,
+        }
+    }
+
+    /// The proof of the negotiation: a model the configured protocol refuses is
+    /// asked on the other one, the answer comes back, and the next call starts
+    /// where the first one landed.
+    #[tokio::test]
+    async fn a_protocol_refusal_switches_once_and_the_switch_is_remembered() {
+        let configured = Arc::new(ScriptedProvider::new(
+            "openai",
+            Err(ProviderError::UnsupportedProtocol {
+                model: "longcat".to_owned(),
+            }),
+        ));
+        let alternate = Arc::new(ScriptedProvider::new(
+            "openai_responses",
+            Ok(ready_outcome()),
+        ));
+        let registry = ProviderRegistry::new()
+            .register(ProviderKind::Openai, configured.clone())
+            .register(ProviderKind::OpenaiResponses, alternate.clone());
+        let runner = scripted_runner(registry, ProviderKind::Openai);
+        let principal = Principal::new(ScopeId::new("scripted-scope"), "user");
+        let function: Arc<dyn AiFunction> = Arc::new(ScriptedFunction);
+
+        let first = runner
+            .run(&principal, Arc::clone(&function), scripted_request())
+            .await
+            .expect("the other protocol must answer");
+        assert_eq!(first.output["text"], "answer");
+        assert_eq!(configured.asked(), vec!["longcat".to_owned()]);
+        assert_eq!(alternate.asked(), vec!["longcat".to_owned()]);
+
+        let second = runner
+            .run(&principal, function, scripted_request())
+            .await
+            .expect("the remembered protocol must answer");
+        assert_eq!(second.output["text"], "answer");
+        assert_eq!(
+            configured.asked(),
+            vec!["longcat".to_owned()],
+            "the refused protocol is asked once per process, not once per call"
+        );
+        assert_eq!(alternate.asked().len(), 2);
+    }
+
+    /// Both protocols refusing is an ordinary upstream failure: one switch, two
+    /// requests, no loop.
+    #[tokio::test]
+    async fn a_refusal_on_both_protocols_fails_without_asking_again() {
+        let configured = Arc::new(ScriptedProvider::new(
+            "openai",
+            Err(ProviderError::UnsupportedProtocol {
+                model: "longcat".to_owned(),
+            }),
+        ));
+        let alternate = Arc::new(ScriptedProvider::new(
+            "openai_responses",
+            Err(ProviderError::UnsupportedProtocol {
+                model: "longcat".to_owned(),
+            }),
+        ));
+        let registry = ProviderRegistry::new()
+            .register(ProviderKind::Openai, configured.clone())
+            .register(ProviderKind::OpenaiResponses, alternate.clone());
+        let runner = scripted_runner(registry, ProviderKind::Openai);
+
+        let error = runner
+            .run(
+                &Principal::new(ScopeId::new("scripted-scope"), "user"),
+                Arc::new(ScriptedFunction),
+                scripted_request(),
+            )
+            .await
+            .expect_err("both protocols refuse the model");
+        assert_eq!(error.kind, FunctionRunErrorKind::Upstream);
+        assert_eq!(error.code, "provider_protocol_not_available");
+        assert_eq!(configured.asked().len(), 1);
+        assert_eq!(alternate.asked().len(), 1);
+    }
+
+    /// With no alternate registered there is nothing to switch to, and the
+    /// refusal is reported as it is.
+    #[tokio::test]
+    async fn a_protocol_refusal_without_a_registered_alternate_stays_upstream() {
+        let configured = Arc::new(ScriptedProvider::new(
+            "openai",
+            Err(ProviderError::UnsupportedProtocol {
+                model: "longcat".to_owned(),
+            }),
+        ));
+        let registry = ProviderRegistry::new().register(ProviderKind::Openai, configured.clone());
+        let runner = scripted_runner(registry, ProviderKind::Openai);
+
+        let error = runner
+            .run(
+                &Principal::new(ScopeId::new("scripted-scope"), "user"),
+                Arc::new(ScriptedFunction),
+                scripted_request(),
+            )
+            .await
+            .expect_err("no other backend is registered");
+        assert_eq!(error.kind, FunctionRunErrorKind::Upstream);
+        assert_eq!(error.code, "provider_protocol_not_available");
+        assert_eq!(configured.asked().len(), 1);
+    }
+
+    /// A provider rate limit is its own run outcome and carries the wait it
+    /// stated, and the runner does not spend an answer attempt on it.
+    #[tokio::test]
+    async fn a_provider_rate_limit_keeps_its_kind_and_stated_wait() {
+        let provider = Arc::new(ScriptedProvider::new(
+            "openai",
+            Err(ProviderError::RateLimited {
+                retry_after_secs: Some(42),
+            }),
+        ));
+        let registry = ProviderRegistry::new().register(ProviderKind::Openai, provider.clone());
+        let runner = scripted_runner(registry, ProviderKind::Openai);
+
+        let error = runner
+            .run(
+                &Principal::new(ScopeId::new("scripted-scope"), "user"),
+                Arc::new(ScriptedFunction),
+                scripted_request(),
+            )
+            .await
+            .expect_err("the provider refused");
+        assert_eq!(error.kind, FunctionRunErrorKind::RateLimited);
+        assert_eq!(error.retry_after_secs, Some(42));
+        assert_eq!(error.code, "provider_rate_limited");
+        assert_eq!(
+            provider.asked().len(),
+            1,
+            "a rate limit is the caller's to schedule, not the runner's to retry"
+        );
     }
 }

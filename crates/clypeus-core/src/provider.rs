@@ -28,6 +28,11 @@ pub const REASONING_NOT_AVAILABLE_CODE: &str = "provider_reasoning_not_available
 /// schema. A caller that needs a document branches on this rather than on prose.
 pub const OUTPUT_NOT_AVAILABLE_CODE: &str = "provider_output_not_available";
 
+/// Fixed error code returned when a provider does not serve a model on the
+/// requested protocol. A caller may act on it by asking the same service for
+/// the other protocol.
+pub const PROTOCOL_NOT_AVAILABLE_CODE: &str = "provider_protocol_not_available";
+
 /// Transport-level provider failure. Only [`ProviderError::code`] and
 /// [`ProviderError::safe_message`] may leave the process.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -46,10 +51,21 @@ pub enum ProviderError {
     Stream(String),
     #[error("Provider completed the turn without an answer")]
     EmptyResponse,
+    /// The provider turned a request away because it is busy. Distinct from
+    /// [`Self::Upstream`] because it is the one refusal worth waiting out, and
+    /// it usually states for how long.
+    #[error("Provider is rate limiting requests")]
+    RateLimited { retry_after_secs: Option<u64> },
     #[error("Provider does not recognize reasoning level '{value}' for model '{model}'")]
     UnsupportedReasoning { model: String, value: String },
     #[error("Provider cannot be asked for a JSON document (model '{model}')")]
     UnsupportedOutput { model: String },
+    /// The provider does not serve this model on the protocol the request used.
+    /// A gateway states this as a structured error type, so a caller learns it
+    /// can ask the other protocol instead of treating a configuration guess as
+    /// permanent.
+    #[error("Provider does not serve model '{model}' on this protocol")]
+    UnsupportedProtocol { model: String },
 }
 
 impl ProviderError {
@@ -63,8 +79,10 @@ impl ProviderError {
             Self::InvalidPayload(_) => "provider_invalid_response",
             Self::Stream(_) => "provider_stream_error",
             Self::EmptyResponse => "provider_empty_response",
+            Self::RateLimited { .. } => "provider_rate_limited",
             Self::UnsupportedReasoning { .. } => REASONING_NOT_AVAILABLE_CODE,
             Self::UnsupportedOutput { .. } => OUTPUT_NOT_AVAILABLE_CODE,
+            Self::UnsupportedProtocol { .. } => PROTOCOL_NOT_AVAILABLE_CODE,
         }
     }
 
@@ -74,19 +92,25 @@ impl ProviderError {
         match self {
             Self::InvalidBaseUrl(detail) => detail.clone(),
             Self::Timeout => "The provider timed out.".to_string(),
-            Self::Upstream { status, .. } if *status == 429 => {
-                "The provider is rate limiting requests; try again later.".to_string()
-            }
             Self::Upstream { .. } => "The provider rejected the request.".to_string(),
             Self::Transport(_) => "The provider is unreachable.".to_string(),
             Self::InvalidPayload(_) => "The provider returned an invalid response.".to_string(),
             Self::Stream(_) => "The provider stream failed.".to_string(),
             Self::EmptyResponse => "The provider completed the turn without an answer.".to_string(),
+            Self::RateLimited { retry_after_secs } => match retry_after_secs {
+                Some(seconds) => {
+                    format!("The provider is rate limiting requests; retry in {seconds} seconds.")
+                }
+                None => "The provider is rate limiting requests; try again later.".to_string(),
+            },
             Self::UnsupportedReasoning { model, value } => format!(
                 "The provider does not support reasoning level '{value}' for model '{model}'."
             ),
             Self::UnsupportedOutput { model } => {
                 format!("The provider cannot be asked for a JSON document with model '{model}'.")
+            }
+            Self::UnsupportedProtocol { model } => {
+                format!("The provider does not serve model '{model}' on this protocol.")
             }
         }
     }
@@ -810,6 +834,80 @@ pub fn extract_error_message(body: &str) -> Option<String> {
     None
 }
 
+/// The error type an OpenAI-compatible gateway uses to say it does not serve a
+/// model on the requested protocol.
+///
+/// Measured against OpenCode Go:
+/// `{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model
+/// does not support this protocol."}}`. The message names no model, so the
+/// request's own model is what the refusal has to carry.
+pub const MODEL_PROTOCOL_UNSUPPORTED_TYPE: &str = "ModelProtocolUnsupported";
+
+/// Extracts the structured error type a provider names, when it names one.
+///
+/// A gateway that can say `ModelProtocolUnsupported` is giving a caller a fact
+/// to branch on; the prose beside it is written for a person, may be reworded,
+/// and on the measured gateway says the same sentence for every model. Reading
+/// the type is what keeps a caller's behaviour from depending on that sentence.
+pub fn extract_error_type(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    for path in &[["error", "type"].as_slice(), &["error", "code"], &["type"]] {
+        if let Some(text) = walk_path(&value, path).and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("error") {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Reads the wait a provider asked for from response headers.
+///
+/// The header only, never the prose in the body: the same number is often
+/// repeated in a sentence, and reading a sentence to get a duration is how a
+/// provider's wording becomes this process's contract. A header is the part a
+/// provider writes for a program to read. Only the integer-seconds form is
+/// parsed; an HTTP date or an absent header means the provider did not state a
+/// wait, which callers already handle.
+pub fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// Classifies a non-success provider response.
+///
+/// A `429` is a rate limit whatever else the body says, and the wait the header
+/// states is what makes it actionable. A structured
+/// `ModelProtocolUnsupported` type is a protocol refusal; `model` is absent
+/// where the request named none (a model list), and a protocol refusal without
+/// a model has nothing to carry. Everything else is an upstream failure with the
+/// provider's own message, or `detail_fallback` when the body names none.
+pub fn response_error(
+    status: u16,
+    retry_after_secs: Option<u64>,
+    body: &str,
+    model: Option<&str>,
+    detail_fallback: &str,
+) -> ProviderError {
+    if status == 429 {
+        return ProviderError::RateLimited { retry_after_secs };
+    }
+    if let Some(model) = model
+        && extract_error_type(body).is_some_and(|kind| kind == MODEL_PROTOCOL_UNSUPPORTED_TYPE)
+    {
+        return ProviderError::UnsupportedProtocol {
+            model: model.to_string(),
+        };
+    }
+    ProviderError::Upstream {
+        status,
+        detail: extract_error_message(body).unwrap_or_else(|| detail_fallback.to_string()),
+    }
+}
+
 /// Walks a JSON path.
 pub fn walk_path<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut cursor = root;
@@ -898,5 +996,113 @@ mod tests {
             Some("nope")
         );
         assert!(extract_error_message("plain text").is_none());
+    }
+
+    #[test]
+    fn protocol_refusal_is_read_from_the_structured_type_not_the_prose() {
+        // The measured gateway body, verbatim. The message names no model; the
+        // request's model is what the classifier carries.
+        let measured = r#"{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}"#;
+        assert_eq!(
+            extract_error_type(measured).as_deref(),
+            Some("ModelProtocolUnsupported")
+        );
+        assert_eq!(
+            response_error(400, None, measured, Some("longcat-2.0"), "bad request"),
+            ProviderError::UnsupportedProtocol {
+                model: "longcat-2.0".to_owned()
+            }
+        );
+
+        // The same words without the structured type are ordinary prose and must
+        // stay an upstream failure: a gateway is free to reword a sentence.
+        let prose_only = r#"{"error":{"message":"ModelProtocolUnsupported: model does not support this protocol"}}"#;
+        assert_eq!(extract_error_type(prose_only), None);
+        assert_eq!(
+            response_error(400, None, prose_only, Some("longcat-2.0"), "bad request"),
+            ProviderError::Upstream {
+                status: 400,
+                detail: "ModelProtocolUnsupported: model does not support this protocol".to_owned(),
+            }
+        );
+
+        // A protocol refusal with no model to carry stays upstream.
+        assert_eq!(
+            response_error(400, None, measured, None, "bad request"),
+            ProviderError::Upstream {
+                status: 400,
+                detail: "Model does not support this protocol.".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_429_is_a_rate_limit_with_the_wait_the_header_stated() {
+        assert_eq!(
+            response_error(
+                429,
+                Some(42),
+                r#"{"error":{"message":"slow down"}}"#,
+                Some("m"),
+                "busy"
+            ),
+            ProviderError::RateLimited {
+                retry_after_secs: Some(42)
+            }
+        );
+        assert_eq!(
+            response_error(429, None, "{}", Some("m"), "busy"),
+            ProviderError::RateLimited {
+                retry_after_secs: None
+            }
+        );
+        assert_eq!(
+            ProviderError::RateLimited {
+                retry_after_secs: Some(42)
+            }
+            .code(),
+            "provider_rate_limited"
+        );
+        assert!(
+            ProviderError::RateLimited {
+                retry_after_secs: Some(42)
+            }
+            .safe_message()
+            .contains("42")
+        );
+    }
+
+    #[test]
+    fn retry_after_reading_ignores_unparsable_and_date_forms() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after_from_headers(&headers), None);
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static(" 17 "),
+        );
+        assert_eq!(retry_after_from_headers(&headers), Some(17));
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(retry_after_from_headers(&headers), None);
+    }
+
+    #[test]
+    fn new_provider_errors_keep_stable_codes_and_safe_messages() {
+        assert_eq!(
+            ProviderError::UnsupportedProtocol {
+                model: "m".to_owned()
+            }
+            .code(),
+            PROTOCOL_NOT_AVAILABLE_CODE
+        );
+        assert_eq!(
+            ProviderError::UnsupportedProtocol {
+                model: "m".to_owned()
+            }
+            .safe_message(),
+            "The provider does not serve model 'm' on this protocol."
+        );
     }
 }
