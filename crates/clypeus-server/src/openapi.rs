@@ -63,6 +63,7 @@ use utoipa::OpenApi;
         crate::dto::SubmitApprovalRequest,
         crate::dto::SetFeedbackRequest,
         crate::dto::PageContextDto,
+        crate::dto::ProviderHeaderDto,
         crate::dto::ScopeSettingsDto,
         crate::dto::UpdateScopeSettingsRequest,
         crate::dto::ConnectionTestDto,

@@ -33,6 +33,17 @@ Callers can request a JSON document that conforms to a schema.
   (`ProviderConfig::with_header`), and every bundled adapter sends them on
   every request, the model list included. A catalog that fails for a missing
   header otherwise looks like a provider with no models.
+* `clypeus-core`: scope settings carry those headers. `ScopeSettings::headers`
+  holds a list of `ProviderHeader { name, value }` with the value kept as a
+  secret so `Debug` redacts it, `FunctionRunner::resolve_provider`,
+  `resolved_provider`, and the standalone server's provider resolution apply
+  them, and both SQL stores keep them in `clypeus_settings.headers` (migration
+  `0003_provider_headers.sql`, `NOT NULL DEFAULT '[]'` in both). A host can
+  now configure a required session header instead of hardcoding a
+  `ProviderConfig` it does not own.
+* The standalone server's admin settings endpoint
+  (`GET`/`PUT /admin/v1/scopes/{scope}/settings`) accepts and returns
+  `headers` as `[{"name": ..., "value": ...}]`.
 * `ProviderKind::OpenaiResponses` (`openai_responses`) selects the new
   backend. The standalone server registers it, and `CLYPEUS_SEED_PROVIDER`
   accepts its spellings.

@@ -22,8 +22,8 @@ use clypeus_core::profile::ProfileSelection;
 use clypeus_core::provider::{ProviderConfig, validate_base_url};
 use clypeus_core::rate_limit::RateKey;
 use clypeus_core::store::{
-    CreateThread, MessageStatus, ScopeSettings, ScopeSettingsUpdate, ThreadUpdate, ToolCallStatus,
-    TurnTarget as StoreTurnTarget,
+    CreateThread, MessageStatus, ProviderHeader, ScopeSettings, ScopeSettingsUpdate, ThreadUpdate,
+    ToolCallStatus, TurnTarget as StoreTurnTarget,
 };
 use clypeus_core::tools::ToolError;
 use serde::Deserialize;
@@ -164,7 +164,7 @@ async fn resolve_provider(
         timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
         max_output_tokens: settings.max_output_tokens,
         allow_private_targets: state.config.core.allow_private_providers,
-        headers: Vec::new(),
+        headers: settings.provider_headers(),
     };
     Ok((settings, config))
 }
@@ -1183,6 +1183,15 @@ pub async fn put_scope_settings(
     } else {
         None
     };
+    let headers = request.headers.map(|headers| {
+        headers
+            .into_iter()
+            .map(|header| ProviderHeader {
+                name: header.name,
+                value: clypeus_core::secrets::SecretString::new(header.value),
+            })
+            .collect()
+    });
     let settings = state
         .settings
         .upsert(
@@ -1194,6 +1203,7 @@ pub async fn put_scope_settings(
                 timeout_ms: request.timeout_ms,
                 max_output_tokens: request.max_output_tokens,
                 api_key_present,
+                headers,
                 profile,
                 extensions: Some(json!({"scopeId": scope.to_string()})),
             },

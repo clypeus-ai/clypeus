@@ -41,6 +41,8 @@ struct MockState {
     calls: std::sync::atomic::AtomicUsize,
     last_reasoning_effort: std::sync::Mutex<Option<Value>>,
     last_response_format: std::sync::Mutex<Option<Value>>,
+    /// The headers of every request the mock received, in arrival order.
+    headers: std::sync::Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
 }
 
 async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
@@ -49,6 +51,7 @@ async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
         calls: std::sync::atomic::AtomicUsize::new(0),
         last_reasoning_effort: std::sync::Mutex::new(None),
         last_response_format: std::sync::Mutex::new(None),
+        headers: std::sync::Mutex::new(Vec::new()),
     });
     let router = Router::new()
         .route("/v1/models", get(mock_models))
@@ -64,7 +67,28 @@ async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
     (format!("http://{addr}"), state)
 }
 
-async fn mock_models() -> Json<Value> {
+/// Keeps the request's headers so a test can assert what the provider actually
+/// saw on the wire, not only what the configuration said.
+fn record_headers(state: &MockState, path: &str, headers: &axum::http::HeaderMap) {
+    let mut captured = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        captured.insert(
+            name.as_str().to_string(),
+            value.to_str().unwrap_or_default().to_string(),
+        );
+    }
+    state
+        .headers
+        .lock()
+        .expect("headers lock")
+        .push((path.to_string(), captured));
+}
+
+async fn mock_models(
+    State(state): State<Arc<MockState>>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    record_headers(&state, "/v1/models", &headers);
     Json(json!({
         "data": [{
             "id": "mock-model",
@@ -135,9 +159,11 @@ fn message_text(body: &Value, role: &str) -> String {
 
 async fn mock_chat(
     State(state): State<Arc<MockState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    record_headers(&state, "/v1/chat/completions", &headers);
     state
         .calls
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -785,6 +811,88 @@ async fn function_runs_through_the_registry() {
             .unwrap()
             .iter()
             .any(|function| function["name"] == "summarize_text")
+    );
+}
+
+/// A gateway that refuses traffic without a header is configured through the
+/// admin settings, and the runner's provider carries the header on every
+/// request — the catalog read included, because a catalog that fails for the
+/// missing header is what "the provider has no models" looks like.
+#[tokio::test]
+async fn runner_sends_configured_provider_headers_on_every_request() {
+    let harness = harness(MockMode::Plain).await;
+    let updated = harness
+        .client
+        .put(harness.url(&format!("/admin/v1/scopes/{SCOPE}/settings")))
+        .bearer_auth(TOKEN)
+        .json(&json!({
+            "headers": [{"name": "x-opencode-session", "value": "testing-platform"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+    let updated: Value = updated.json().await.unwrap();
+    assert_eq!(
+        updated["headers"],
+        json!([{"name": "x-opencode-session", "value": "testing-platform"}]),
+        "the settings endpoint must return the configured headers"
+    );
+
+    let response = harness
+        .post(
+            "/v1/functions/summarize_text",
+            json!({"inputs": {"text": "Some long text to summarize."}}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        200,
+        "function: {:?}",
+        response.text().await
+    );
+
+    let headers = harness.mock.headers.lock().unwrap();
+    for path in ["/v1/models", "/v1/chat/completions"] {
+        let captured = headers
+            .iter()
+            .find(|(captured_path, _)| captured_path == path)
+            .unwrap_or_else(|| panic!("the runner never called {path}"));
+        assert_eq!(
+            captured.1.get("x-opencode-session").map(String::as_str),
+            Some("testing-platform"),
+            "session header missing on {path}"
+        );
+    }
+}
+
+/// A scope that configured no headers sends none: the header is configuration,
+/// and an empty list is not "send whatever the previous configuration had".
+#[tokio::test]
+async fn scope_without_headers_sends_none() {
+    let harness = harness(MockMode::Plain).await;
+    let response = harness
+        .post(
+            "/v1/functions/summarize_text",
+            json!({"inputs": {"text": "Some long text to summarize."}}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        200,
+        "function: {:?}",
+        response.text().await
+    );
+    let headers = harness.mock.headers.lock().unwrap();
+    assert!(
+        headers.len() >= 2,
+        "the runner must have called both the catalog and the completion"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(_, captured)| !captured.contains_key("x-opencode-session")),
+        "headers: {headers:?}"
     );
 }
 

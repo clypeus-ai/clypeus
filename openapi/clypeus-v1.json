@@ -920,6 +920,22 @@
           }
         ]
       },
+      "ProviderHeaderDto": {
+        "description": "One header every provider request from a scope carries.\n\nThe value is a plain string on the wire: it is configuration the\nadministrator typed, and the settings endpoint exists to show it back for\nediting. The core record holds it as a secret so logs cannot print it.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
       "ProviderKind": {
         "description": "Provider backend a scope is configured to use.",
         "enum": [
@@ -1040,6 +1056,12 @@
             ]
           },
           "extensions": {},
+          "headers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderHeaderDto"
+            },
+            "type": "array"
+          },
           "maxOutputTokens": {
             "format": "int32",
             "type": "integer"
@@ -1069,6 +1091,7 @@
           "apiKeyStored",
           "timeoutMs",
           "maxOutputTokens",
+          "headers",
           "profile",
           "extensions",
           "createdAtUtc"
@@ -1476,6 +1499,16 @@
           "defaultModel": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "headers": {
+            "description": "Headers every provider request from this scope must carry. Absent keeps\nthe stored list; an empty list clears it.",
+            "items": {
+              "$ref": "#/components/schemas/ProviderHeaderDto"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },

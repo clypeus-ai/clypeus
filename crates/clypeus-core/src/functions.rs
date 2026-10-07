@@ -723,6 +723,20 @@ impl FunctionRunner {
                 }
                 Err(error) => {
                     metrics::record_provider_request(provider, error.code());
+                    // The whole error, not the sentence the caller is given. A provider's
+                    // refusal carries the status and the provider's own words about what
+                    // it did not like, and collapsing that into "the provider rejected the
+                    // request" before anything writes it down leaves an operator with no
+                    // way to tell a wrong model from a wrong schema from a bad key. The
+                    // sentence stays what a person is shown; this is what an operator
+                    // reads.
+                    tracing::warn!(
+                        function = function.name(),
+                        %model,
+                        provider,
+                        error = ?error,
+                        "the provider refused a function run"
+                    );
                     self.audit_function(
                         principal,
                         function.name(),
@@ -841,6 +855,12 @@ impl FunctionRunner {
                 ));
             }
         };
+        // Taken from the stored settings rather than left to the caller: a header a
+        // gateway requires is part of the scope's provider configuration, exactly
+        // as the timeout and the output ceiling are, or a host that configured one
+        // could never make a catalog request succeed. Read before `base_url` moves
+        // out of the record below.
+        let headers = settings.provider_headers();
         let Some(base_url) = settings.base_url.filter(|url| !url.trim().is_empty()) else {
             return Err(FunctionRunError::unavailable(
                 "AI provider base URL is not configured.",
@@ -866,7 +886,7 @@ impl FunctionRunner {
             timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
             max_output_tokens: settings.max_output_tokens,
             allow_private_targets: self.allow_private_targets,
-            headers: Vec::new(),
+            headers,
         };
         Ok(ProviderTarget {
             provider_kind: settings.provider_kind,

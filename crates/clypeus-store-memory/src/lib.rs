@@ -254,6 +254,7 @@ impl ScopeSettingsStore for MemoryStore {
                 timeout_ms: 60_000,
                 max_output_tokens: 1_200,
                 api_key_present: false,
+                headers: Vec::new(),
                 profile: ProfileSelection::default(),
                 extensions: Value::Object(Map::new()),
                 created_at: now,
@@ -276,6 +277,9 @@ impl ScopeSettingsStore for MemoryStore {
         }
         if let Some(present) = update.api_key_present {
             settings.api_key_present = present;
+        }
+        if let Some(headers) = update.headers {
+            settings.headers = headers;
         }
         if let Some(profile) = update.profile {
             settings.profile = profile;

@@ -74,9 +74,9 @@ pub use secrets::{SecretError, SecretStore, SecretString};
 pub use store::{
     ApprovalStore, ApprovalView, AssistantFinish, BeginTurn, ConversationStore, CreateThread,
     Feedback, FeedbackRating, Message, MessageStatus, NewToolApproval, NewToolCall,
-    PersistedToolCall, Readiness, ScopeSettings, ScopeSettingsStore, ScopeSettingsUpdate,
-    StartedTurn, StaticScopeSettings, StoreError, Thread, ThreadUpdate, ThreadView,
-    ToolCallCompletion, ToolCallSnapshot, ToolCallStatus, TurnTarget, TurnUsage,
+    PersistedToolCall, ProviderHeader, Readiness, ScopeSettings, ScopeSettingsStore,
+    ScopeSettingsUpdate, StartedTurn, StaticScopeSettings, StoreError, Thread, ThreadUpdate,
+    ThreadView, ToolCallCompletion, ToolCallSnapshot, ToolCallStatus, TurnTarget, TurnUsage,
 };
 pub use tools::{
     Approval, DEFAULT_TOOL_TIMEOUT, Egress, EgressAuth, EgressResponse, Risk, Tool, ToolDefinition,

@@ -408,6 +408,18 @@ pub struct SetFeedbackRequest {
     pub comment: Option<String>,
 }
 
+/// One header every provider request from a scope carries.
+///
+/// The value is a plain string on the wire: it is configuration the
+/// administrator typed, and the settings endpoint exists to show it back for
+/// editing. The core record holds it as a secret so logs cannot print it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHeaderDto {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScopeSettingsDto {
@@ -418,6 +430,7 @@ pub struct ScopeSettingsDto {
     pub api_key_stored: bool,
     pub timeout_ms: i32,
     pub max_output_tokens: i32,
+    pub headers: Vec<ProviderHeaderDto>,
     pub profile: serde_json::Value,
     pub extensions: serde_json::Value,
     pub created_at_utc: DateTime<Utc>,
@@ -439,6 +452,14 @@ impl From<ScopeSettings> for ScopeSettingsDto {
             api_key_stored: settings.api_key_present,
             timeout_ms: settings.timeout_ms,
             max_output_tokens: settings.max_output_tokens,
+            headers: settings
+                .headers
+                .into_iter()
+                .map(|header| ProviderHeaderDto {
+                    name: header.name,
+                    value: header.value.expose().to_string(),
+                })
+                .collect(),
             profile: serde_json::to_value(&settings.profile).unwrap_or(serde_json::Value::Null),
             extensions: settings.extensions,
             created_at_utc: settings.created_at,
@@ -464,6 +485,10 @@ pub struct UpdateScopeSettingsRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
+    /// Headers every provider request from this scope must carry. Absent keeps
+    /// the stored list; an empty list clears it.
+    #[serde(default)]
+    pub headers: Option<Vec<ProviderHeaderDto>>,
     /// Profile selection: `{"mode": "builtin"|"custom"|"disabled", ...}`.
     #[serde(default)]
     pub profile: Option<serde_json::Value>,

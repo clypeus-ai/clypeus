@@ -19,9 +19,9 @@ use clypeus_core::provider::OutputFormat;
 use clypeus_core::store::{
     ApprovalStore, ApprovalView, AssistantFinish, BeginTurn, ConversationStore, CreateThread,
     Feedback, FeedbackRating, Message, MessageStatus, MessageVersion, NewToolApproval, NewToolCall,
-    PersistedToolCall, ScopeSettings, ScopeSettingsStore, ScopeSettingsUpdate, StartedTurn,
-    StoreError, Thread, ThreadUpdate, ThreadView, ToolCallCompletion, ToolCallSnapshot,
-    ToolCallStatus, TurnTarget, TurnUsage, UsageEntry,
+    PersistedToolCall, ProviderHeader, ScopeSettings, ScopeSettingsStore, ScopeSettingsUpdate,
+    StartedTurn, StoreError, Thread, ThreadUpdate, ThreadView, ToolCallCompletion,
+    ToolCallSnapshot, ToolCallStatus, TurnTarget, TurnUsage, UsageEntry,
 };
 use serde_json::{Map, Value};
 use sqlx::any::install_default_drivers;
@@ -267,6 +267,18 @@ fn parse_output_format(value: &str) -> Result<OutputFormat, StoreError> {
 
 fn serialize_output_format(output: &OutputFormat) -> Result<String, StoreError> {
     serde_json::to_string(output).map_err(|error| StoreError::Backend(error.to_string()))
+}
+
+/// Decodes the stored provider headers. A malformed value is a store error for
+/// the same reason the output format is: reading it as "no headers" would drop
+/// configuration a gateway requires, and the resulting refusal would carry no
+/// hint that the configuration was lost.
+fn parse_provider_headers(value: &str) -> Result<Vec<ProviderHeader>, StoreError> {
+    serde_json::from_str(value).map_err(|error| StoreError::Backend(format!("headers: {error}")))
+}
+
+fn serialize_provider_headers(headers: &[ProviderHeader]) -> Result<String, StoreError> {
+    serde_json::to_string(headers).map_err(|error| StoreError::Backend(error.to_string()))
 }
 
 fn parse_status(value: &str) -> MessageStatus {
@@ -599,6 +611,7 @@ impl ScopeSettingsStore for SqlStore {
             timeout_ms: column_int(&row, "timeout_ms")? as i32,
             max_output_tokens: column_int(&row, "max_output_tokens")? as i32,
             api_key_present: column_int(&row, "api_key_present")? != 0,
+            headers: parse_provider_headers(&column_text(&row, "headers")?)?,
             profile,
             extensions: column_opt_text(&row, "extensions")?
                 .map(|raw| parse_json(&raw))
@@ -622,6 +635,7 @@ impl ScopeSettingsStore for SqlStore {
             timeout_ms: 60_000,
             max_output_tokens: 1_200,
             api_key_present: false,
+            headers: Vec::new(),
             profile: ProfileSelection::default(),
             extensions: Value::Object(Map::new()),
             created_at: now,
@@ -645,6 +659,9 @@ impl ScopeSettingsStore for SqlStore {
         if let Some(present) = update.api_key_present {
             settings.api_key_present = present;
         }
+        if let Some(headers) = update.headers {
+            settings.headers = headers;
+        }
         if let Some(profile) = update.profile {
             settings.profile = profile;
         }
@@ -655,9 +672,9 @@ impl ScopeSettingsStore for SqlStore {
         self.exec(
             "INSERT INTO clypeus_settings (
                 scope_id, provider_kind, base_url, default_model, timeout_ms,
-                max_output_tokens, api_key_present, profile_mode, profile_custom,
-                extensions, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                max_output_tokens, api_key_present, headers, profile_mode,
+                profile_custom, extensions, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(scope_id) DO UPDATE SET
                 provider_kind = excluded.provider_kind,
                 base_url = excluded.base_url,
@@ -665,6 +682,7 @@ impl ScopeSettingsStore for SqlStore {
                 timeout_ms = excluded.timeout_ms,
                 max_output_tokens = excluded.max_output_tokens,
                 api_key_present = excluded.api_key_present,
+                headers = excluded.headers,
                 profile_mode = excluded.profile_mode,
                 profile_custom = excluded.profile_custom,
                 extensions = excluded.extensions,
@@ -677,6 +695,7 @@ impl ScopeSettingsStore for SqlStore {
                 i64::from(settings.timeout_ms).into(),
                 i64::from(settings.max_output_tokens).into(),
                 i64::from(settings.api_key_present).into(),
+                serialize_provider_headers(&settings.headers)?.into(),
                 profile_mode(&settings.profile).into(),
                 profile_custom(&settings.profile).into(),
                 serde_json::to_string(&settings.extensions)

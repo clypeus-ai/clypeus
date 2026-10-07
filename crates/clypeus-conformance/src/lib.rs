@@ -16,10 +16,11 @@ use clypeus_core::models::{ProviderKind, TokenUsage};
 use clypeus_core::principal::{Principal, ScopeId};
 use clypeus_core::profile::ProfileSelection;
 use clypeus_core::provider::OutputFormat;
+use clypeus_core::secrets::SecretString;
 use clypeus_core::store::{
     ApprovalStore, AssistantFinish, BeginTurn, ConversationStore, CreateThread, MessageStatus,
-    NewToolApproval, NewToolCall, ScopeSettingsStore, ScopeSettingsUpdate, StoreError,
-    ThreadUpdate, ToolCallCompletion, ToolCallStatus, TurnTarget,
+    NewToolApproval, NewToolCall, ProviderHeader, ScopeSettingsStore, ScopeSettingsUpdate,
+    StoreError, ThreadUpdate, ToolCallCompletion, ToolCallStatus, TurnTarget,
 };
 use clypeus_core::tools::{
     Approval, Egress, EgressAuth, EgressResponse, Risk, Tool, ToolEgress, ToolError,
@@ -107,6 +108,16 @@ where
                 timeout_ms: Some(45_000),
                 max_output_tokens: Some(2_000),
                 api_key_present: Some(true),
+                headers: Some(vec![
+                    ProviderHeader {
+                        name: "x-gateway-session".into(),
+                        value: SecretString::new("stable-session"),
+                    },
+                    ProviderHeader {
+                        name: "x-tenant".into(),
+                        value: SecretString::new("acme"),
+                    },
+                ]),
                 profile: Some(ProfileSelection::Builtin {
                     custom: Some("be brief".into()),
                 }),
@@ -132,6 +143,17 @@ where
         "settings_round_trip",
         loaded.provider_kind == ProviderKind::Anthropic
             && loaded.base_url.as_deref() == Some("https://api.example.com")
+            && loaded.headers
+                == vec![
+                    ProviderHeader {
+                        name: "x-gateway-session".into(),
+                        value: SecretString::new("stable-session"),
+                    },
+                    ProviderHeader {
+                        name: "x-tenant".into(),
+                        value: SecretString::new("acme"),
+                    },
+                ]
             && loaded.profile
                 == ProfileSelection::Builtin {
                     custom: Some("be brief".into())
@@ -151,8 +173,23 @@ where
         .map_err(|error| backend("settings_update", error))?;
     expect!(
         "settings_partial_update_clears_empty_string",
-        updated.default_model.is_none() && updated.base_url.is_some(),
+        updated.default_model.is_none() && updated.base_url.is_some() && updated.headers.len() == 2,
         "an empty string must clear a field without touching others"
+    );
+    let cleared = store
+        .upsert(
+            &scope,
+            ScopeSettingsUpdate {
+                headers: Some(Vec::new()),
+                ..ScopeSettingsUpdate::default()
+            },
+        )
+        .await
+        .map_err(|error| backend("settings_update", error))?;
+    expect!(
+        "settings_headers_clear_to_empty",
+        cleared.headers.is_empty() && cleared.base_url.is_some(),
+        "an empty header list must clear the stored headers without touching others"
     );
     Ok(())
 }
