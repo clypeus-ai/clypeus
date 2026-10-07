@@ -924,7 +924,8 @@
         "description": "Provider backend a scope is configured to use.",
         "enum": [
           "openai",
-          "anthropic"
+          "anthropic",
+          "openai_responses"
         ],
         "type": "string"
       },

@@ -18,8 +18,9 @@ or more model providers and owns four guarantees:
 The core is a library (`clypeus-core`) with an optional standalone server
 (`clypeus`). Applications embed the core and plug in their own principal
 resolver, policy engine, tools, functions, and stores; the standalone server
-bundles a JWKS/static resolver, a file secret store, OpenAI-compatible and
-Anthropic providers, and memory/SQLite/PostgreSQL stores.
+bundles a JWKS/static resolver, a file secret store, OpenAI-compatible Chat
+Completions and Responses providers, an Anthropic provider, and
+memory/SQLite/PostgreSQL stores.
 
 ## Crates
 
@@ -28,6 +29,7 @@ Anthropic providers, and memory/SQLite/PostgreSQL stores.
 | `clypeus-core` | Principals, policy, providers, tools, broker, approvals, guard, orchestrator, SSE, rate limiting, metrics |
 | `clypeus-server` | Standalone HTTP surface (binary `clypeus`), OpenAPI, health/readiness/metrics |
 | `clypeus-provider-openai` | OpenAI-compatible Chat Completions provider |
+| `clypeus-provider-openai-responses` | OpenAI-compatible Responses API provider |
 | `clypeus-provider-anthropic` | Anthropic Messages provider |
 | `clypeus-store-memory` | In-memory store for tests and embedded deployments |
 | `clypeus-store-sqlite` | SQLite store (single node, edge, development) |

@@ -20,10 +20,22 @@ Callers can request a JSON document that conforms to a schema.
   `{"type":"json_schema","json_schema":{"name":...,"strict":true,"schema":...}}`.
   `clypeus-provider-anthropic` returns `UnsupportedOutput`, because the
   Messages API has no field for it.
+* `clypeus-provider-openai-responses`: a provider for the Responses API
+  (`POST /v1/responses`), for models a gateway serves only on that protocol.
+  It maps messages, tools, `tool_choice`, `max_output_tokens`, reasoning, and
+  `OutputFormat::JsonSchema` (as `text.format`) onto the request, reads the
+  buffered answer by output-item kind rather than position, and decodes the
+  streamed `response.output_text.delta`,
+  `response.reasoning_summary_text.delta`, and
+  `response.function_call_arguments` events. A `200` whose `status` is not
+  `completed` is refused: its text is a prefix of a document.
 * `clypeus-core`: `ProviderConfig` carries provider-required headers
   (`ProviderConfig::with_header`), and every bundled adapter sends them on
   every request, the model list included. A catalog that fails for a missing
   header otherwise looks like a provider with no models.
+* `ProviderKind::OpenaiResponses` (`openai_responses`) selects the new
+  backend. The standalone server registers it, and `CLYPEUS_SEED_PROVIDER`
+  accepts its spellings.
 * The requested format is stored on the assistant message row
   (`clypeus_messages.output_format`, migration `0002_message_output_format.sql`,
   `NOT NULL DEFAULT '{"type":"text"}'` in both SQL stores), so a turn that

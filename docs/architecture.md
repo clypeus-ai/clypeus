@@ -8,7 +8,7 @@ client ── HTTP ──▶ clypeus-server (or an embedding application)
                      │  PolicyEngine       → allow/deny scope checks
                      │  ProfileStore + TurnContextProvider → system message
                      ▼
-                  Orchestrator ──▶ Provider (OpenAI-compatible, Anthropic, ...)
+                  Orchestrator ──▶ Provider (Chat Completions, Responses, Anthropic, ...)
                      │                  ▲
                      │                  │  tool results (untrusted-wrapped)
                      ▼                  │
