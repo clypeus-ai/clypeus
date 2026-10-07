@@ -866,6 +866,7 @@ impl FunctionRunner {
             timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
             max_output_tokens: settings.max_output_tokens,
             allow_private_targets: self.allow_private_targets,
+            headers: Vec::new(),
         };
         Ok(ProviderTarget {
             provider_kind: settings.provider_kind,

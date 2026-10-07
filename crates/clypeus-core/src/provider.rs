@@ -108,6 +108,11 @@ pub struct ProviderConfig {
     /// When false (default), base URLs resolving to private, loopback or
     /// link-local addresses are rejected.
     pub allow_private_targets: bool,
+    /// Headers every request to this provider must carry, in insertion order.
+    /// A gateway that refuses traffic without one (a session header, for
+    /// example) otherwise looks like a provider with no models, because the
+    /// catalog request fails the same way the completions do.
+    pub headers: Vec<(String, SecretString)>,
 }
 
 impl ProviderConfig {
@@ -118,6 +123,7 @@ impl ProviderConfig {
             timeout: Duration::from_secs(60),
             max_output_tokens: 1_200,
             allow_private_targets: false,
+            headers: Vec::new(),
         }
     }
 
@@ -134,6 +140,23 @@ impl ProviderConfig {
     pub fn allow_private_targets(mut self, allow: bool) -> Self {
         self.allow_private_targets = allow;
         self
+    }
+
+    /// Adds a header every request to this provider carries. The value is held
+    /// as a secret because a header a provider requires in order to accept
+    /// traffic is usually a credential, and this struct derives `Debug`.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), SecretString::new(value)));
+        self
+    }
+
+    /// Applies every configured header to an outgoing request. Adapters call
+    /// this on each request, the model list included: a catalog that fails for
+    /// a missing header is indistinguishable from a provider with no models.
+    pub fn apply_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.headers.iter().fold(request, |request, (name, value)| {
+            request.header(name.as_str(), value.expose())
+        })
     }
 }
 
@@ -559,7 +582,8 @@ impl ProviderStream {
 /// A provider backend implementation.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
-    /// Stable provider identifier (`openai`, `anthropic`).
+    /// Stable provider identifier (`openai`, `anthropic`,
+    /// `openai_responses`).
     fn id(&self) -> &'static str;
 
     /// Fetches the model catalog.
@@ -828,6 +852,18 @@ mod tests {
         assert!(validate_base_url("http://[::1]:9000", false).is_err());
         assert!(validate_base_url("http://127.0.0.1:8080", true).is_ok());
         assert!(validate_base_url("http://example.invalid", true).is_ok());
+    }
+
+    #[test]
+    fn provider_config_collects_headers_in_order_without_logging_values() {
+        let config = ProviderConfig::new("https://example.com", "key")
+            .with_header("x-session-id", "stable-session")
+            .with_header("x-other", "another");
+        assert_eq!(config.headers.len(), 2);
+        assert_eq!(config.headers[0].0, "x-session-id");
+        assert_eq!(config.headers[0].1.expose(), "stable-session");
+        assert_eq!(config.headers[1].0, "x-other");
+        assert!(!format!("{config:?}").contains("stable-session"));
     }
 
     #[test]

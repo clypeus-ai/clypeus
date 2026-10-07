@@ -20,6 +20,10 @@ Callers can request a JSON document that conforms to a schema.
   `{"type":"json_schema","json_schema":{"name":...,"strict":true,"schema":...}}`.
   `clypeus-provider-anthropic` returns `UnsupportedOutput`, because the
   Messages API has no field for it.
+* `clypeus-core`: `ProviderConfig` carries provider-required headers
+  (`ProviderConfig::with_header`), and every bundled adapter sends them on
+  every request, the model list included. A catalog that fails for a missing
+  header otherwise looks like a provider with no models.
 * The requested format is stored on the assistant message row
   (`clypeus_messages.output_format`, migration `0002_message_output_format.sql`,
   `NOT NULL DEFAULT '{"type":"text"}'` in both SQL stores), so a turn that

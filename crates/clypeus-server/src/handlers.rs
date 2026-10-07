@@ -164,6 +164,7 @@ async fn resolve_provider(
         timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
         max_output_tokens: settings.max_output_tokens,
         allow_private_targets: state.config.core.allow_private_providers,
+        headers: Vec::new(),
     };
     Ok((settings, config))
 }
@@ -205,6 +206,7 @@ pub async fn preview_models(
         timeout: Duration::from_secs(30),
         max_output_tokens: 1_200,
         allow_private_targets: state.config.core.allow_private_providers,
+        headers: Vec::new(),
     };
     let catalog = fetch_catalog(&state, request.provider_kind, &config).await?;
     Ok(Json(catalog.into()))
@@ -1236,6 +1238,7 @@ pub async fn admin_preview_models(
         timeout: Duration::from_secs(30),
         max_output_tokens: 1_200,
         allow_private_targets: state.config.core.allow_private_providers,
+        headers: Vec::new(),
     };
     let catalog = fetch_catalog(&state, request.provider_kind, &config).await?;
     Ok(Json(catalog.into()))

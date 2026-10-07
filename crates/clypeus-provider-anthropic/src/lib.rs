@@ -60,9 +60,11 @@ impl AnthropicProvider {
         request: reqwest::RequestBuilder,
         config: &ProviderConfig,
     ) -> reqwest::RequestBuilder {
-        request
-            .header("x-api-key", config.api_key.expose())
-            .header("anthropic-version", ANTHROPIC_VERSION)
+        config.apply_headers(
+            request
+                .header("x-api-key", config.api_key.expose())
+                .header("anthropic-version", ANTHROPIC_VERSION),
+        )
     }
 
     async fn start_stream(
@@ -778,5 +780,92 @@ mod tests {
         assert!(has_reasoning(&request("m", Some("high"))));
         assert!(!has_reasoning(&request("m", Some("default"))));
         assert!(!has_reasoning(&request("m", None)));
+    }
+
+    #[derive(Default)]
+    struct HeaderCapture {
+        requests: std::sync::Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
+    }
+
+    async fn capture_request(
+        axum::extract::State(capture): axum::extract::State<std::sync::Arc<HeaderCapture>>,
+        axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+        headers: axum::http::HeaderMap,
+    ) -> axum::Json<Value> {
+        let mut captured = std::collections::BTreeMap::new();
+        for (name, value) in &headers {
+            captured.insert(
+                name.as_str().to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            );
+        }
+        capture
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((uri.path().to_string(), captured));
+        axum::Json(json!({
+            "data": [{"id": "captured"}],
+            "content": [{"type": "text", "text": "captured answer"}],
+        }))
+    }
+
+    async fn spawn_capture() -> (String, std::sync::Arc<HeaderCapture>) {
+        let capture = std::sync::Arc::new(HeaderCapture::default());
+        let router = axum::Router::new()
+            .route("/v1/models", axum::routing::get(capture_request))
+            .route("/v1/messages", axum::routing::post(capture_request))
+            .with_state(std::sync::Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock provider binds");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{address}"), capture)
+    }
+
+    #[tokio::test]
+    async fn configured_headers_reach_the_catalog_and_the_completion() {
+        let (base_url, capture) = spawn_capture().await;
+        let config = ProviderConfig::new(base_url, "test-key")
+            .allow_private_targets(true)
+            .with_header("x-session-id", "stable-session");
+        let provider = AnthropicProvider::new();
+        provider.catalog(&config).await.expect("catalog");
+        provider
+            .complete(&config, request("claude-x", None))
+            .await
+            .expect("completion");
+
+        let requests = capture
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            requests.len(),
+            2,
+            "catalog and completion must both be sent"
+        );
+        assert_eq!(requests[0].0, "/v1/models");
+        assert_eq!(requests[1].0, "/v1/messages");
+        for (path, headers) in requests.iter() {
+            assert_eq!(
+                headers.get("x-session-id").map(String::as_str),
+                Some("stable-session"),
+                "session header missing on {path}"
+            );
+            assert_eq!(
+                headers.get("x-api-key").map(String::as_str),
+                Some("test-key"),
+                "api key missing on {path}"
+            );
+            assert_eq!(
+                headers.get("anthropic-version").map(String::as_str),
+                Some(ANTHROPIC_VERSION),
+                "version header missing on {path}"
+            );
+        }
     }
 }

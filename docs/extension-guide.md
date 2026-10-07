@@ -135,6 +135,10 @@ cannot express that constraint returns `ProviderError::UnsupportedOutput`
 rather than ignoring the field and leaving the caller to discover the
 mismatch.
 
+Providers can require request headers (`ProviderConfig::with_header`). Every
+bundled adapter sends them on every request, the model catalog included, so a
+gateway that authenticates with a session header is reachable end to end.
+
 Embedders that serve HTTP without the standalone binary can reuse
 `clypeus-server::app` with a fully custom `AppState`; the standalone server is
 a reference composition, not a requirement.
