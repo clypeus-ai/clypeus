@@ -11,7 +11,8 @@ use clypeus_core::models::{ChatMessage, ChatRole, TokenUsage, ToolCall, ToolSpec
 use clypeus_core::provider::{
     AssistantOutcome, CompletionRequest, ModelCapability, ModelCatalog, PayloadEvent, ProbeReport,
     Provider, ProviderConfig, ProviderError, ProviderStream, RoundDelta, StreamAccumulator,
-    StreamDecoder, extract_error_message, validate_base_url,
+    StreamDecoder, extract_error_message, response_error, retry_after_from_headers,
+    validate_base_url,
 };
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
@@ -103,16 +104,21 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(map_send_error)?;
         let status = response.status();
+        let retry_after = retry_after_from_headers(response.headers());
         let body = response
             .text()
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
         if !status.is_success() {
-            return Err(ProviderError::Upstream {
-                status: status.as_u16(),
-                detail: extract_error_message(&body)
-                    .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string()),
-            });
+            return Err(response_error(
+                status.as_u16(),
+                retry_after,
+                &body,
+                // Anthropic has no second wire shape in this codebase, so a
+                // protocol refusal has no meaning here; a rate limit still does.
+                None,
+                status.canonical_reason().unwrap_or("error"),
+            ));
         }
         let root: Value = serde_json::from_str(&body)
             .map_err(|error| ProviderError::InvalidPayload(error.to_string()))?;
@@ -195,6 +201,7 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(map_send_error)?;
         let status = response.status();
+        let retry_after = retry_after_from_headers(response.headers());
         let body = response
             .text()
             .await
@@ -246,6 +253,7 @@ impl Provider for AnthropicProvider {
                 .await
                 .map_err(map_send_error)?;
             let retry_status = retry.status();
+            let retry_hint = retry_after_from_headers(retry.headers());
             let retry_body = retry.text().await.unwrap_or_default();
             if retry_status.is_success() {
                 let value: Value = serde_json::from_str(&retry_body).unwrap_or(Value::Null);
@@ -257,18 +265,22 @@ impl Provider for AnthropicProvider {
                     "upstream returned no response text on retry".into(),
                 ));
             }
-            return Err(ProviderError::Upstream {
-                status: retry_status.as_u16(),
-                detail: extract_error_message(&retry_body)
-                    .unwrap_or_else(|| "upstream error on retry".into()),
-            });
+            return Err(response_error(
+                retry_status.as_u16(),
+                retry_hint,
+                &retry_body,
+                None,
+                "upstream error on retry",
+            ));
         }
 
-        Err(ProviderError::Upstream {
-            status: status.as_u16(),
-            detail: extract_error_message(&body)
-                .unwrap_or_else(|| status.canonical_reason().unwrap_or("upstream error").into()),
-        })
+        Err(response_error(
+            status.as_u16(),
+            retry_after,
+            &body,
+            None,
+            status.canonical_reason().unwrap_or("upstream error"),
+        ))
     }
 
     async fn stream(
@@ -291,23 +303,29 @@ impl Provider for AnthropicProvider {
                 let retry = self.start_stream(&url, config, &payload).await?;
                 if !retry.status().is_success() {
                     let status = retry.status().as_u16();
+                    let retry_hint = retry_after_from_headers(retry.headers());
                     let body = retry.text().await.unwrap_or_default();
-                    return Err(ProviderError::Upstream {
+                    return Err(response_error(
                         status,
-                        detail: extract_error_message(&body)
-                            .unwrap_or_else(|| "upstream stream error".into()),
-                    });
+                        retry_hint,
+                        &body,
+                        None,
+                        "upstream stream error",
+                    ));
                 }
                 retry
             }
             response => {
                 let status = response.status().as_u16();
+                let retry_hint = retry_after_from_headers(response.headers());
                 let body = response.text().await.unwrap_or_default();
-                return Err(ProviderError::Upstream {
+                return Err(response_error(
                     status,
-                    detail: extract_error_message(&body)
-                        .unwrap_or_else(|| "upstream stream error".into()),
-                });
+                    retry_hint,
+                    &body,
+                    None,
+                    "upstream stream error",
+                ));
             }
         };
         let stream = response
@@ -867,5 +885,41 @@ mod tests {
                 "version header missing on {path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_429_becomes_a_rate_limit_with_the_wait_the_header_stated() {
+        use axum::response::IntoResponse;
+        let router = axum::Router::new().fallback(move || async move {
+            let mut response = (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
+            )
+                .into_response();
+            response.headers_mut().insert(
+                reqwest::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("42"),
+            );
+            response
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock provider binds");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let config =
+            ProviderConfig::new(format!("http://{address}"), "key").allow_private_targets(true);
+        let error = AnthropicProvider::new()
+            .complete(&config, request("claude-x", None))
+            .await
+            .expect_err("429 must be an error");
+        assert_eq!(
+            error,
+            ProviderError::RateLimited {
+                retry_after_secs: Some(42)
+            }
+        );
     }
 }

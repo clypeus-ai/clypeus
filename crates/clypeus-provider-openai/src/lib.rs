@@ -13,7 +13,7 @@ use clypeus_core::models::{ChatMessage, ChatRole, TokenUsage, ToolCall, ToolSpec
 use clypeus_core::provider::{
     AssistantOutcome, CompletionRequest, ModelCapability, ModelCatalog, PayloadEvent, ProbeReport,
     Provider, ProviderConfig, ProviderError, ProviderStream, RoundDelta, StreamDecoder,
-    extract_error_message, validate_base_url, walk_path,
+    extract_error_message, response_error, retry_after_from_headers, validate_base_url, walk_path,
 };
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
@@ -89,16 +89,21 @@ impl Provider for OpenAiProvider {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
             .to_ascii_lowercase();
+        // Headers are read before the body: consuming the body moves the
+        // response, and the wait a rate limit states is in a header.
+        let retry_after = retry_after_from_headers(response.headers());
         let body = response
             .text()
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
         if !status.is_success() {
-            return Err(ProviderError::Upstream {
-                status: status.as_u16(),
-                detail: extract_error_message(&body)
-                    .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string()),
-            });
+            return Err(response_error(
+                status.as_u16(),
+                retry_after,
+                &body,
+                None,
+                status.canonical_reason().unwrap_or("error"),
+            ));
         }
         if !is_jsonish(&content_type, &body) {
             return Err(ProviderError::InvalidPayload(
@@ -185,6 +190,7 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(map_send_error)?;
         let status = response.status();
+        let retry_after = retry_after_from_headers(response.headers());
         let body = response
             .text()
             .await
@@ -241,6 +247,7 @@ impl Provider for OpenAiProvider {
                 .await
                 .map_err(map_send_error)?;
             let retry_status = retry.status();
+            let retry_hint = retry_after_from_headers(retry.headers());
             let retry_body = retry.text().await.unwrap_or_default();
             if retry_status.is_success() {
                 let value: Value = serde_json::from_str(&retry_body).unwrap_or(Value::Null);
@@ -254,18 +261,22 @@ impl Provider for OpenAiProvider {
                     "upstream returned no response text on retry".into(),
                 ));
             }
-            return Err(ProviderError::Upstream {
-                status: retry_status.as_u16(),
-                detail: extract_error_message(&retry_body)
-                    .unwrap_or_else(|| "upstream error on retry".into()),
-            });
+            return Err(response_error(
+                retry_status.as_u16(),
+                retry_hint,
+                &retry_body,
+                Some(&request.model),
+                "upstream error on retry",
+            ));
         }
 
-        Err(ProviderError::Upstream {
-            status: status.as_u16(),
-            detail: extract_error_message(&body)
-                .unwrap_or_else(|| status.canonical_reason().unwrap_or("upstream error").into()),
-        })
+        Err(response_error(
+            status.as_u16(),
+            retry_after,
+            &body,
+            Some(&request.model),
+            status.canonical_reason().unwrap_or("upstream error"),
+        ))
     }
 
     async fn stream(
@@ -288,23 +299,29 @@ impl Provider for OpenAiProvider {
                 let retry = self.start_stream(&url, config, &payload).await?;
                 if !retry.status().is_success() {
                     let status = retry.status().as_u16();
+                    let retry_hint = retry_after_from_headers(retry.headers());
                     let body = retry.text().await.unwrap_or_default();
-                    return Err(ProviderError::Upstream {
+                    return Err(response_error(
                         status,
-                        detail: extract_error_message(&body)
-                            .unwrap_or_else(|| "upstream stream error".into()),
-                    });
+                        retry_hint,
+                        &body,
+                        Some(&request.model),
+                        "upstream stream error",
+                    ));
                 }
                 retry
             }
             response => {
                 let status = response.status().as_u16();
+                let retry_hint = retry_after_from_headers(response.headers());
                 let body = response.text().await.unwrap_or_default();
-                return Err(ProviderError::Upstream {
+                return Err(response_error(
                     status,
-                    detail: extract_error_message(&body)
-                        .unwrap_or_else(|| "upstream stream error".into()),
-                });
+                    retry_hint,
+                    &body,
+                    Some(&request.model),
+                    "upstream stream error",
+                ));
             }
         };
         let stream = response
@@ -1106,5 +1123,116 @@ mod tests {
                 "bearer auth missing on {path}"
             );
         }
+    }
+
+    /// A mock gateway that answers every request with one status, optional
+    /// `Retry-After`, and body.
+    async fn spawn_error(
+        status: u16,
+        retry_after: Option<&'static str>,
+        body: &'static str,
+    ) -> String {
+        use axum::response::IntoResponse;
+        let router = axum::Router::new().fallback(move || async move {
+            let mut response = (
+                axum::http::StatusCode::from_u16(status).expect("valid status"),
+                body,
+            )
+                .into_response();
+            if let Some(value) = retry_after {
+                response.headers_mut().insert(
+                    reqwest::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static(value),
+                );
+            }
+            response
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock provider binds");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn a_429_becomes_a_rate_limit_with_the_wait_the_header_stated() {
+        let base_url = spawn_error(429, Some("42"), r#"{"error":{"message":"slow down"}}"#).await;
+        let config = ProviderConfig::new(base_url, "key").allow_private_targets(true);
+        let error = OpenAiProvider::new()
+            .complete(&config, request(None))
+            .await
+            .expect_err("429 must be an error");
+        assert_eq!(
+            error,
+            ProviderError::RateLimited {
+                retry_after_secs: Some(42)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_written_in_prose_is_not_a_retry_after() {
+        let base_url = spawn_error(429, None, r#"{"error":{"message":"retry after 99s"}}"#).await;
+        let config = ProviderConfig::new(base_url, "key").allow_private_targets(true);
+        let error = OpenAiProvider::new()
+            .complete(&config, request(None))
+            .await
+            .expect_err("429 must be an error");
+        assert_eq!(
+            error,
+            ProviderError::RateLimited {
+                retry_after_secs: None
+            }
+        );
+    }
+
+    /// The streamed path classifies a refused start the same way the buffered
+    /// one does; it is a separate call site and would otherwise drift.
+    #[tokio::test]
+    async fn a_streamed_429_keeps_the_rate_limit_and_its_wait() {
+        let base_url = spawn_error(429, Some("7"), "{}").await;
+        let config = ProviderConfig::new(base_url, "key").allow_private_targets(true);
+        let error = OpenAiProvider::new()
+            .stream(&config, request(None))
+            .await
+            .expect_err("429 must be an error");
+        assert_eq!(
+            error,
+            ProviderError::RateLimited {
+                retry_after_secs: Some(7)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_structured_protocol_type_is_read_and_the_prose_is_not_matched() {
+        let measured = r#"{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}"#;
+        let base_url = spawn_error(400, None, measured).await;
+        let config = ProviderConfig::new(base_url, "key").allow_private_targets(true);
+        let error = OpenAiProvider::new()
+            .complete(&config, request(None))
+            .await
+            .expect_err("400 must be an error");
+        assert_eq!(
+            error,
+            ProviderError::UnsupportedProtocol {
+                model: "ubi-model".to_owned()
+            }
+        );
+
+        // The same words without the structured type must stay ordinary prose:
+        // a gateway is free to reword a sentence, and a caller branching on it
+        // would then break with the wording.
+        let prose = r#"{"error":{"message":"ModelProtocolUnsupported: model does not support this protocol"}}"#;
+        let base_url = spawn_error(400, None, prose).await;
+        let config = ProviderConfig::new(base_url, "key").allow_private_targets(true);
+        let error = OpenAiProvider::new()
+            .complete(&config, request(None))
+            .await
+            .expect_err("400 must be an error");
+        assert!(matches!(error, ProviderError::Upstream { status: 400, .. }));
     }
 }

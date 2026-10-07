@@ -125,10 +125,10 @@ impl From<ProviderError> for ApiError {
                 "provider_timeout",
                 "The provider timed out.",
             ),
-            ProviderError::Upstream { status, .. } if *status == 429 => Self::new(
+            ProviderError::RateLimited { .. } => Self::new(
                 StatusCode::TOO_MANY_REQUESTS,
-                "provider_unavailable",
-                "The provider is rate limiting requests; try again later.",
+                "provider_rate_limited",
+                error.safe_message(),
             ),
             _ => {
                 tracing::warn!(detail = %error, "provider failure");

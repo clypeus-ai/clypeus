@@ -32,6 +32,20 @@ impl ProviderKind {
         }
     }
 
+    /// The other wire shape of the same OpenAI service, when there is one.
+    ///
+    /// A gateway may serve one model on chat completions and another on
+    /// responses, refusing the wrong shape with `ModelProtocolUnsupported`. The
+    /// two OpenAI kinds are alternatives for one service; Anthropic is a
+    /// different API, not another spelling of the same one.
+    pub const fn alternate_protocol(self) -> Option<Self> {
+        match self {
+            Self::Openai => Some(Self::OpenaiResponses),
+            Self::OpenaiResponses => Some(Self::Openai),
+            Self::Anthropic => None,
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "open_ai" => Some(Self::Openai),
@@ -211,6 +225,19 @@ mod tests {
             Some(ProviderKind::OpenaiResponses)
         );
         assert_eq!(ProviderKind::parse("other"), None);
+    }
+
+    #[test]
+    fn the_two_openai_kinds_are_alternates_and_anthropic_is_not() {
+        assert_eq!(
+            ProviderKind::Openai.alternate_protocol(),
+            Some(ProviderKind::OpenaiResponses)
+        );
+        assert_eq!(
+            ProviderKind::OpenaiResponses.alternate_protocol(),
+            Some(ProviderKind::Openai)
+        );
+        assert_eq!(ProviderKind::Anthropic.alternate_protocol(), None);
     }
 
     #[test]
