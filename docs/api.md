@@ -54,6 +54,19 @@ reasoning parameter. Accepted values are forwarded to the provider unchanged,
 and `POST /v1/completions` forwards any value verbatim without catalog
 validation.
 
+### Output formats
+
+`output` requests a JSON document instead of free text. It is accepted by
+`POST /v1/completions`, `POST /v1/threads/{id}/messages`,
+`PATCH /v1/messages/{id}`, and `POST /v1/messages/{id}/regenerate`; absent
+means free text. The value is `{"type":"text"}` or
+`{"type":"json_schema","name":"...","schema":{...}}`. A provider that can
+enforce the schema does so while the model decodes; a provider that cannot
+fails the request with the stable code `provider_output_not_available`
+instead of answering with prose. Assistant messages expose the requested
+format as `outputFormat`, recorded when the turn began so an approval resume
+still holds the provider to the same contract.
+
 ### SSE events
 
 Text and reasoning stream as anonymous `data:` chunks

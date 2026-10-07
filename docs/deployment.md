@@ -18,7 +18,7 @@ The `clypeus` binary reads `CLYPEUS_*` environment variables.
 | `CLYPEUS_SECRET_DIR` | Directory backing the file secret store |
 | `CLYPEUS_EGRESS_SERVICES` | `name=https://base,name2=...` tool egress allowlist |
 | `CLYPEUS_ALLOW_PRIVATE_PROVIDERS` | Allow provider base URLs on private addresses |
-| `CLYPEUS_SEED_SCOPE`, `CLYPEUS_SEED_BASE_URL`, `CLYPEUS_SEED_API_KEY`, `CLYPEUS_SEED_PROVIDER`, `CLYPEUS_SEED_MODEL` | Startup seed for a scope |
+| `CLYPEUS_SEED_SCOPE`, `CLYPEUS_SEED_BASE_URL`, `CLYPEUS_SEED_API_KEY`, `CLYPEUS_SEED_PROVIDER`, `CLYPEUS_SEED_MODEL` | Startup seed for a scope; the provider is `openai`, `openai_responses`, or `anthropic` |
 | `CLYPEUS_CHAT_RATE_LIMIT`, `CLYPEUS_CHAT_RATE_WINDOW_SECONDS`, `CLYPEUS_FUNCTION_RATE_LIMIT` | Rate limits |
 | `CLYPEUS_TURN_BUDGET_SECONDS`, `CLYPEUS_MAX_TOOL_ROUNDS`, `CLYPEUS_MAX_TOOL_CALLS`, `CLYPEUS_MAX_TURN_RESULT_BYTES` | Turn budgets |
 | `CLYPEUS_APPROVAL_TTL_SECONDS`, `CLYPEUS_WRITE_QUOTA_PER_DAY` | Approval and write policy |

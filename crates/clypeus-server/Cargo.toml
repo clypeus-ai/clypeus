@@ -18,6 +18,7 @@ clypeus-core.workspace = true
 clypeus-auth-jwks.workspace = true
 clypeus-secret-file.workspace = true
 clypeus-provider-openai.workspace = true
+clypeus-provider-openai-responses.workspace = true
 clypeus-provider-anthropic.workspace = true
 clypeus-store-memory.workspace = true
 clypeus-store-postgres.workspace = true

@@ -6,6 +6,7 @@ members = [
     "crates/clypeus-conformance",
     "crates/clypeus-provider-anthropic",
     "crates/clypeus-provider-openai",
+    "crates/clypeus-provider-openai-responses",
     "crates/clypeus-secret-file",
     "crates/clypeus-server",
     "crates/clypeus-store-memory",
@@ -55,6 +56,7 @@ clypeus-auth-jwks = { path = "crates/clypeus-auth-jwks", version = "1.2.0" }
 clypeus-conformance = { path = "crates/clypeus-conformance", version = "1.2.0" }
 clypeus-provider-anthropic = { path = "crates/clypeus-provider-anthropic", version = "1.2.0" }
 clypeus-provider-openai = { path = "crates/clypeus-provider-openai", version = "1.2.0" }
+clypeus-provider-openai-responses = { path = "crates/clypeus-provider-openai-responses", version = "1.2.0" }
 clypeus-secret-file = { path = "crates/clypeus-secret-file", version = "1.2.0" }
 clypeus-store-memory = { path = "crates/clypeus-store-memory", version = "1.2.0" }
 clypeus-store-postgres = { path = "crates/clypeus-store-postgres", version = "1.2.0" }

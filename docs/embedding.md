@@ -22,6 +22,7 @@ Add the crates you need and pin an exact tag:
 [dependencies]
 clypeus-core = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
 clypeus-provider-openai = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
+clypeus-provider-openai-responses = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
 clypeus-store-postgres = { git = "https://github.com/clypeus-ai/clypeus", tag = "v1.0.0" }
 ```
 
@@ -33,8 +34,9 @@ The composition root is small by design:
    implements `ScopeSettingsStore`, `ConversationStore`, `ApprovalStore`,
    `AuditSink`, and `AuditReader`.
 2. **Providers.** Register provider implementations in a `ProviderRegistry`.
-   `clypeus-provider-openai` and `clypeus-provider-anthropic` cover the
-   bundled shapes; a custom provider only implements `Provider`.
+   `clypeus-provider-openai`, `clypeus-provider-openai-responses`, and
+   `clypeus-provider-anthropic` cover the bundled shapes; a custom provider
+   only implements `Provider`.
 3. **Principal and policy.** Implement `PrincipalResolver` and `PolicyEngine`.
    The core passes opaque `ScopeId`, `subject`, and `scopes` through
    unchanged; the embedder decides what they mean.

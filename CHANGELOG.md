@@ -3,6 +3,60 @@
 All notable changes to this project are documented here. The format follows
 Keep a Changelog and the project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+Callers can request a JSON document that conforms to a schema.
+
+### Added
+
+* `clypeus-core`: `OutputFormat` (`Text`, the default, or `JsonSchema { name,
+  schema }`) carried on `CompletionRequest::output` and `TurnRequest::output`,
+  and `ProviderError::UnsupportedOutput` with the stable code
+  `provider_output_not_available` for a provider that cannot constrain
+  decoding. `AiFunction` runs ask the provider for the function's own
+  `output_schema()`.
+* `clypeus-provider-openai`: sends a requested schema as a strict
+  `response_format`:
+  `{"type":"json_schema","json_schema":{"name":...,"strict":true,"schema":...}}`.
+  `clypeus-provider-anthropic` returns `UnsupportedOutput`, because the
+  Messages API has no field for it.
+* `clypeus-provider-openai-responses`: a provider for the Responses API
+  (`POST /v1/responses`), for models a gateway serves only on that protocol.
+  It maps messages, tools, `tool_choice`, `max_output_tokens`, reasoning, and
+  `OutputFormat::JsonSchema` (as `text.format`) onto the request, reads the
+  buffered answer by output-item kind rather than position, and decodes the
+  streamed `response.output_text.delta`,
+  `response.reasoning_summary_text.delta`, and
+  `response.function_call_arguments` events. A `200` whose `status` is not
+  `completed` is refused: its text is a prefix of a document.
+* `clypeus-core`: `ProviderConfig` carries provider-required headers
+  (`ProviderConfig::with_header`), and every bundled adapter sends them on
+  every request, the model list included. A catalog that fails for a missing
+  header otherwise looks like a provider with no models.
+* `clypeus-core`: scope settings carry those headers. `ScopeSettings::headers`
+  holds a list of `ProviderHeader { name, value }` with the value kept as a
+  secret so `Debug` redacts it, `FunctionRunner::resolve_provider`,
+  `resolved_provider`, and the standalone server's provider resolution apply
+  them, and both SQL stores keep them in `clypeus_settings.headers` (migration
+  `0003_provider_headers.sql`, `NOT NULL DEFAULT '[]'` in both). A host can
+  now configure a required session header instead of hardcoding a
+  `ProviderConfig` it does not own.
+* The standalone server's admin settings endpoint
+  (`GET`/`PUT /admin/v1/scopes/{scope}/settings`) accepts and returns
+  `headers` as `[{"name": ..., "value": ...}]`.
+* `ProviderKind::OpenaiResponses` (`openai_responses`) selects the new
+  backend. The standalone server registers it, and `CLYPEUS_SEED_PROVIDER`
+  accepts its spellings.
+* The requested format is stored on the assistant message row
+  (`clypeus_messages.output_format`, migration `0002_message_output_format.sql`,
+  `NOT NULL DEFAULT '{"type":"text"}'` in both SQL stores), so a turn that
+  parks for a tool approval is resumed with the format of the original
+  request, which the resuming request never saw.
+* `POST /v1/completions`, `POST /v1/threads/{id}/messages`,
+  `PATCH /v1/messages/{id}` and `POST /v1/messages/{id}/regenerate` accept an
+  `output` field (absent means free text); `MessageDto` exposes
+  `outputFormat`.
+
 ## [1.2.0] - 2026-09-27
 
 Cancelled turns become a first-class terminal state with an explicit stop.

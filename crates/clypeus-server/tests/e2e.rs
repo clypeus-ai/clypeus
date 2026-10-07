@@ -40,6 +40,9 @@ struct MockState {
     mode: MockMode,
     calls: std::sync::atomic::AtomicUsize,
     last_reasoning_effort: std::sync::Mutex<Option<Value>>,
+    last_response_format: std::sync::Mutex<Option<Value>>,
+    /// The headers of every request the mock received, in arrival order.
+    headers: std::sync::Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
 }
 
 async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
@@ -47,6 +50,8 @@ async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
         mode,
         calls: std::sync::atomic::AtomicUsize::new(0),
         last_reasoning_effort: std::sync::Mutex::new(None),
+        last_response_format: std::sync::Mutex::new(None),
+        headers: std::sync::Mutex::new(Vec::new()),
     });
     let router = Router::new()
         .route("/v1/models", get(mock_models))
@@ -62,7 +67,28 @@ async fn spawn_mock(mode: MockMode) -> (String, Arc<MockState>) {
     (format!("http://{addr}"), state)
 }
 
-async fn mock_models() -> Json<Value> {
+/// Keeps the request's headers so a test can assert what the provider actually
+/// saw on the wire, not only what the configuration said.
+fn record_headers(state: &MockState, path: &str, headers: &axum::http::HeaderMap) {
+    let mut captured = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        captured.insert(
+            name.as_str().to_string(),
+            value.to_str().unwrap_or_default().to_string(),
+        );
+    }
+    state
+        .headers
+        .lock()
+        .expect("headers lock")
+        .push((path.to_string(), captured));
+}
+
+async fn mock_models(
+    State(state): State<Arc<MockState>>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    record_headers(&state, "/v1/models", &headers);
     Json(json!({
         "data": [{
             "id": "mock-model",
@@ -133,13 +159,16 @@ fn message_text(body: &Value, role: &str) -> String {
 
 async fn mock_chat(
     State(state): State<Arc<MockState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    record_headers(&state, "/v1/chat/completions", &headers);
     state
         .calls
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     *state.last_reasoning_effort.lock().expect("lock") = body.get("reasoning_effort").cloned();
+    *state.last_response_format.lock().expect("lock") = body.get("response_format").cloned();
     let has_tool_result = body
         .get("messages")
         .and_then(Value::as_array)
@@ -615,6 +644,73 @@ async fn approval_allow_executes_once_and_replay_is_refused() {
 }
 
 #[tokio::test]
+async fn approval_resume_keeps_the_requested_output_format() {
+    let harness = harness(MockMode::ApprovalTool).await;
+    let thread = harness.create_thread().await;
+    let output = json!({
+        "type": "json_schema",
+        "name": "record_result",
+        "schema": {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": false
+        }
+    });
+    let response = harness
+        .post(
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"content": "create a record", "stream": false, "output": output}),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "turn: {:?}", response.text().await);
+    let turn: Value = response.json().await.unwrap();
+    assert_eq!(turn["assistantMessage"]["status"], "awaiting_approval");
+    assert_eq!(
+        turn["assistantMessage"]["outputFormat"], output,
+        "the requested format must be persisted and served back"
+    );
+    let expected_payload = json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "record_result",
+            "strict": true,
+            "schema": output["schema"].clone()
+        }
+    });
+    assert_eq!(
+        *harness.mock.last_response_format.lock().unwrap(),
+        Some(expected_payload.clone()),
+        "the parked turn asked the provider for the document"
+    );
+
+    let call = &turn["assistantMessage"]["toolCalls"][0];
+    let hash = call["approval"]["argumentsHash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let call_id = call["id"].as_str().unwrap().to_string();
+    let allowed = harness
+        .post(
+            &format!("/v1/tool-calls/{call_id}/approvals"),
+            json!({"decision": "allow", "argumentsHash": hash, "stream": false}),
+        )
+        .await;
+    assert_eq!(allowed.status(), 200, "allow: {:?}", allowed.text().await);
+    let resumed: Value = allowed.json().await.unwrap();
+    assert_eq!(resumed["assistantMessage"]["status"], "complete");
+    assert_eq!(
+        resumed["assistantMessage"]["outputFormat"], output,
+        "the format must survive the approval resume"
+    );
+    assert_eq!(
+        *harness.mock.last_response_format.lock().unwrap(),
+        Some(expected_payload),
+        "the approval request never saw the schema; the resumed turn must still ask for it"
+    );
+}
+
+#[tokio::test]
 async fn approval_deny_resumes_with_a_refusal() {
     let harness = harness(MockMode::ApprovalTool).await;
     let thread = harness.create_thread().await;
@@ -715,6 +811,88 @@ async fn function_runs_through_the_registry() {
             .unwrap()
             .iter()
             .any(|function| function["name"] == "summarize_text")
+    );
+}
+
+/// A gateway that refuses traffic without a header is configured through the
+/// admin settings, and the runner's provider carries the header on every
+/// request — the catalog read included, because a catalog that fails for the
+/// missing header is what "the provider has no models" looks like.
+#[tokio::test]
+async fn runner_sends_configured_provider_headers_on_every_request() {
+    let harness = harness(MockMode::Plain).await;
+    let updated = harness
+        .client
+        .put(harness.url(&format!("/admin/v1/scopes/{SCOPE}/settings")))
+        .bearer_auth(TOKEN)
+        .json(&json!({
+            "headers": [{"name": "x-opencode-session", "value": "testing-platform"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+    let updated: Value = updated.json().await.unwrap();
+    assert_eq!(
+        updated["headers"],
+        json!([{"name": "x-opencode-session", "value": "testing-platform"}]),
+        "the settings endpoint must return the configured headers"
+    );
+
+    let response = harness
+        .post(
+            "/v1/functions/summarize_text",
+            json!({"inputs": {"text": "Some long text to summarize."}}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        200,
+        "function: {:?}",
+        response.text().await
+    );
+
+    let headers = harness.mock.headers.lock().unwrap();
+    for path in ["/v1/models", "/v1/chat/completions"] {
+        let captured = headers
+            .iter()
+            .find(|(captured_path, _)| captured_path == path)
+            .unwrap_or_else(|| panic!("the runner never called {path}"));
+        assert_eq!(
+            captured.1.get("x-opencode-session").map(String::as_str),
+            Some("testing-platform"),
+            "session header missing on {path}"
+        );
+    }
+}
+
+/// A scope that configured no headers sends none: the header is configuration,
+/// and an empty list is not "send whatever the previous configuration had".
+#[tokio::test]
+async fn scope_without_headers_sends_none() {
+    let harness = harness(MockMode::Plain).await;
+    let response = harness
+        .post(
+            "/v1/functions/summarize_text",
+            json!({"inputs": {"text": "Some long text to summarize."}}),
+        )
+        .await;
+    assert_eq!(
+        response.status(),
+        200,
+        "function: {:?}",
+        response.text().await
+    );
+    let headers = harness.mock.headers.lock().unwrap();
+    assert!(
+        headers.len() >= 2,
+        "the runner must have called both the catalog and the completion"
+    );
+    assert!(
+        headers
+            .iter()
+            .all(|(_, captured)| !captured.contains_key("x-opencode-session")),
+        "headers: {headers:?}"
     );
 }
 

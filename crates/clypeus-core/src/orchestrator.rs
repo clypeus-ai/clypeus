@@ -31,8 +31,8 @@ use crate::metrics;
 use crate::models::{ChatMessage, ChatRole, ProviderKind, TokenUsage, ToolCall, ToolSpec};
 use crate::principal::ScopeId;
 use crate::provider::{
-    AssistantOutcome, CompletionRequest, ProviderConfig, ProviderError, ProviderRegistry,
-    ProviderStream, StreamDelta, ToolChoice,
+    AssistantOutcome, CompletionRequest, OutputFormat, ProviderConfig, ProviderError,
+    ProviderRegistry, ProviderStream, StreamDelta, ToolChoice,
 };
 use crate::sse;
 use crate::store::{AssistantFinish, ConversationStore, MessageStatus, ScopeSettings, StoreError};
@@ -84,6 +84,9 @@ pub struct TurnRequest {
     pub assistant_message_id: Uuid,
     pub context: TurnContext,
     pub limits: TurnLimits,
+    /// The shape the answer must take. Carried here rather than defaulted deep inside the
+    /// call, because a caller who needs a document is the only one who knows it.
+    pub output: OutputFormat,
 }
 
 /// Final answer of a completed turn.
@@ -351,8 +354,13 @@ impl Orchestrator {
 
     pub async fn run_buffered(&self, request: TurnRequest) -> Result<TurnOutcome, ProviderError> {
         let outcome = self.run_loop(&request, None, None, None).await;
-        self.persist_outcome(&request.caller, request.assistant_message_id, &outcome)
-            .await;
+        self.persist_outcome(
+            &request.caller,
+            request.assistant_message_id,
+            &request.output,
+            &outcome,
+        )
+        .await;
         outcome
     }
 
@@ -375,6 +383,7 @@ impl Orchestrator {
                 request.caller.scope().clone(),
                 request.caller.subject().to_string(),
                 request.assistant_message_id,
+                request.output.clone(),
             );
             let opened = sender
                 .send(Ok(Bytes::from(sse::turn_started(
@@ -398,6 +407,7 @@ impl Orchestrator {
                         &sender,
                         request.assistant_message_id,
                         &request.caller,
+                        &request.output,
                         Ok(stopped),
                     )
                     .await;
@@ -414,6 +424,7 @@ impl Orchestrator {
                     &sender,
                     request.assistant_message_id,
                     &request.caller,
+                    &request.output,
                     outcome,
                 )
                 .await;
@@ -434,11 +445,29 @@ impl Orchestrator {
         let slot = self.turns.register(request.assistant_message_id);
         tokio::spawn(async move {
             let watch = slot.watch();
+            // The persisted row is the only place the resumed turn can learn
+            // the shape its original request asked for; an unreadable row is an
+            // error rather than a silent fall back to free text.
+            let output = match self
+                .persisted_output(&request.caller, request.assistant_message_id)
+                .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    tracing::warn!(
+                        detail = %error,
+                        message_id = %request.assistant_message_id,
+                        "parked turn output format was not readable"
+                    );
+                    return;
+                }
+            };
             let mut guard = TurnGuard::arm(
                 Arc::clone(&self.conversation),
                 request.caller.scope().clone(),
                 request.caller.subject().to_string(),
                 request.assistant_message_id,
+                output.clone(),
             );
             let opened = sender
                 .send(Ok(Bytes::from(sse::turn_started(
@@ -458,16 +487,18 @@ impl Orchestrator {
                     reason: StopReason::ClientDisconnected,
                 };
                 let persisted = self
-                    .finish_resumed_streamed(&sender, &request, Ok(stopped))
+                    .finish_resumed_streamed(&sender, &request, &output, Ok(stopped))
                     .await;
                 if persisted {
                     guard.disarm();
                 }
                 return;
             }
-            let outcome = self.run_resume(&request, Some(&sender), Some(watch)).await;
+            let outcome = self
+                .run_resume(&request, Some(&sender), Some(watch), &output)
+                .await;
             let persisted = self
-                .finish_resumed_streamed(&sender, &request, outcome)
+                .finish_resumed_streamed(&sender, &request, &output, outcome)
                 .await;
             if persisted {
                 guard.disarm();
@@ -482,10 +513,33 @@ impl Orchestrator {
         &self,
         request: ResumeRequest,
     ) -> Result<TurnOutcome, ProviderError> {
-        let outcome = self.run_resume(&request, None, None).await;
-        self.persist_outcome(&request.caller, request.assistant_message_id, &outcome)
-            .await;
+        let output = self
+            .persisted_output(&request.caller, request.assistant_message_id)
+            .await?;
+        let outcome = self.run_resume(&request, None, None, &output).await;
+        self.persist_outcome(
+            &request.caller,
+            request.assistant_message_id,
+            &output,
+            &outcome,
+        )
+        .await;
         outcome
+    }
+
+    /// Reads the output format persisted when the turn began. A resume request
+    /// never saw the original turn request, so the assistant row is the only
+    /// truthful source for the shape the answer must still take.
+    async fn persisted_output(
+        &self,
+        caller: &Caller,
+        assistant_message_id: Uuid,
+    ) -> Result<OutputFormat, ProviderError> {
+        self.conversation
+            .message(caller.scope(), caller.subject(), assistant_message_id)
+            .await
+            .map(|message| message.output_format)
+            .map_err(|error| ProviderError::Transport(error.to_string()))
     }
 
     /// Persists the terminal state of a buffered outcome.
@@ -493,6 +547,7 @@ impl Orchestrator {
         &self,
         caller: &Caller,
         assistant_message_id: Uuid,
+        output: &OutputFormat,
         outcome: &Result<TurnOutcome, ProviderError>,
     ) {
         let (status, error_code, completion) = match outcome {
@@ -524,6 +579,7 @@ impl Orchestrator {
             &completion,
             status,
             error_code,
+            output,
         )
         .await;
     }
@@ -533,6 +589,7 @@ impl Orchestrator {
         sender: &Sender,
         assistant_message_id: Uuid,
         caller: &Caller,
+        output: &OutputFormat,
         outcome: Result<TurnOutcome, ProviderError>,
     ) -> bool {
         let (status, error_code, completion) = match outcome {
@@ -566,6 +623,7 @@ impl Orchestrator {
                 &completion,
                 status,
                 error_code,
+                output,
             )
             .await;
         match status {
@@ -615,6 +673,7 @@ impl Orchestrator {
         &self,
         sender: &Sender,
         request: &ResumeRequest,
+        output: &OutputFormat,
         outcome: Result<TurnOutcome, ProviderError>,
     ) -> bool {
         let (status, error_code) = match &outcome {
@@ -642,6 +701,7 @@ impl Orchestrator {
                 &completion,
                 status,
                 error_code,
+                output,
             )
             .await;
         match status {
@@ -682,6 +742,7 @@ impl Orchestrator {
         completion: &TurnCompletion,
         status: MessageStatus,
         error_detail: Option<&str>,
+        output: &OutputFormat,
     ) -> bool {
         let finish = AssistantFinish {
             scope: caller.scope(),
@@ -692,6 +753,7 @@ impl Orchestrator {
             usage: completion.usage.as_ref(),
             status,
             error_detail,
+            output,
         };
         match self.conversation.finalize_assistant(finish).await {
             Ok(()) => true,
@@ -707,6 +769,7 @@ impl Orchestrator {
         request: &ResumeRequest,
         sender: Option<&Sender>,
         watch: Option<TurnWatch>,
+        output: &OutputFormat,
     ) -> Result<TurnOutcome, ProviderError> {
         let call = request.action.request();
         let risk = self.broker.tool_risk(&call.name).unwrap_or("write");
@@ -800,6 +863,7 @@ impl Orchestrator {
             assistant_message_id: request.assistant_message_id,
             context: request.context.clone(),
             limits: request.limits,
+            output: output.clone(),
         };
         self.run_loop(&turn, sender, prior_reasoning, watch).await
     }
@@ -869,6 +933,7 @@ impl Orchestrator {
                 model: request.model.clone(),
                 messages: messages.clone(),
                 reasoning: request.reasoning.clone(),
+                output: request.output.clone(),
                 tools: if offering {
                     request.tools.clone()
                 } else {
@@ -1335,6 +1400,10 @@ struct TurnGuard {
     scope: ScopeId,
     subject: String,
     message_id: Uuid,
+    /// The shape the turn was asked to produce, repeated when the guard
+    /// finalizes an abandoned turn so the stored contract is never rewritten
+    /// as prose by omission.
+    output: OutputFormat,
     armed: bool,
 }
 
@@ -1344,12 +1413,14 @@ impl TurnGuard {
         scope: ScopeId,
         subject: String,
         message_id: Uuid,
+        output: OutputFormat,
     ) -> Self {
         Self {
             conversation,
             scope,
             subject,
             message_id,
+            output,
             armed: true,
         }
     }
@@ -1370,6 +1441,7 @@ impl Drop for TurnGuard {
         let scope = self.scope.clone();
         let subject = self.subject.clone();
         let message_id = self.message_id;
+        let output = self.output.clone();
         tokio::spawn(async move {
             let finish = AssistantFinish {
                 scope: &scope,
@@ -1380,6 +1452,7 @@ impl Drop for TurnGuard {
                 usage: None,
                 status: MessageStatus::Error,
                 error_detail: Some("turn_incomplete"),
+                output: &output,
             };
             if let Err(error) = conversation.finalize_assistant(finish).await {
                 tracing::warn!(%error, %message_id, "abandoned turn was not finalized");
@@ -1421,6 +1494,7 @@ pub fn resolved_provider(
             timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
             max_output_tokens: settings.max_output_tokens,
             allow_private_targets: false,
+            headers: settings.provider_headers(),
         },
         default_model: settings.default_model.clone(),
     })
@@ -1572,6 +1646,7 @@ mod tests {
                     context_json: None,
                     model: None,
                     reasoning_level: None,
+                    output_format: OutputFormat::Text,
                     status: MessageStatus::Complete,
                     error_detail: None,
                     usage: None,
@@ -1599,6 +1674,7 @@ mod tests {
                     context_json: None,
                     model: None,
                     reasoning_level: None,
+                    output_format: OutputFormat::Text,
                     status: MessageStatus::Pending,
                     error_detail: None,
                     usage: None,
@@ -1671,6 +1747,7 @@ mod tests {
                 message.reasoning_content = finish.reasoning.map(str::to_string);
                 message.status = finish.status;
                 message.error_detail = finish.error_detail.map(str::to_string);
+                message.output_format = finish.output.clone();
                 message.completed_at = Some(chrono::Utc::now());
             }
             Ok(())
@@ -1946,6 +2023,7 @@ mod tests {
             assistant_message_id: assistant,
             context: TurnContext::empty(),
             limits: TurnLimits::default(),
+            output: OutputFormat::Text,
         };
         let outcome = orchestrator.run_buffered(request).await.unwrap();
         match outcome {
@@ -1992,6 +2070,7 @@ mod tests {
             assistant_message_id: assistant,
             context: TurnContext::empty(),
             limits: TurnLimits::default(),
+            output: OutputFormat::Text,
         };
 
         let mut stream = Arc::clone(&orchestrator).spawn_streamed(request);
@@ -2074,6 +2153,7 @@ mod tests {
             assistant_message_id: assistant,
             context: TurnContext::empty(),
             limits: TurnLimits::default(),
+            output: OutputFormat::Text,
         };
         let outcome = orchestrator.run_buffered(request).await.unwrap();
         match outcome {
@@ -2082,5 +2162,116 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resumed_turn_reuses_the_persisted_output_format() {
+        #[derive(Default)]
+        struct OutputRecordingProvider {
+            outputs: Mutex<Vec<OutputFormat>>,
+        }
+
+        #[async_trait]
+        impl crate::provider::Provider for OutputRecordingProvider {
+            fn id(&self) -> &'static str {
+                "recording"
+            }
+            async fn catalog(
+                &self,
+                _config: &ProviderConfig,
+            ) -> Result<crate::provider::ModelCatalog, ProviderError> {
+                Ok(crate::provider::ModelCatalog::default())
+            }
+            async fn probe(&self, _config: &ProviderConfig) -> crate::provider::ProbeReport {
+                crate::provider::ProbeReport {
+                    succeeded: true,
+                    model_count: Some(0),
+                    elapsed_ms: 0,
+                    checked_at_utc: chrono::Utc::now(),
+                    error: None,
+                }
+            }
+            async fn complete(
+                &self,
+                _config: &ProviderConfig,
+                request: CompletionRequest,
+            ) -> Result<AssistantOutcome, ProviderError> {
+                self.outputs.lock().unwrap().push(request.output);
+                Ok(AssistantOutcome {
+                    content: "done".into(),
+                    ..AssistantOutcome::default()
+                })
+            }
+            async fn stream(
+                &self,
+                _config: &ProviderConfig,
+                _request: CompletionRequest,
+            ) -> Result<ProviderStream, ProviderError> {
+                Err(ProviderError::Transport("buffered only".into()))
+            }
+        }
+
+        let provider = Arc::new(OutputRecordingProvider::default());
+        let store = Arc::new(MemoryStore::default());
+        let orchestrator = orchestrator(provider.clone(), Arc::clone(&store));
+        let thread = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let assistant = Uuid::new_v4();
+        store.insert_assistant(thread, user, assistant);
+        let document = OutputFormat::JsonSchema {
+            name: "answer".into(),
+            schema: json!({"type": "object", "properties": {"ok": {"type": "boolean"}}}),
+        };
+        store
+            .messages
+            .lock()
+            .unwrap()
+            .get_mut(&assistant)
+            .unwrap()
+            .output_format = document.clone();
+
+        let request = ResumeRequest {
+            provider: ResumeProvider {
+                provider_kind: ProviderKind::Openai,
+                provider: ProviderConfig::new("https://example.com", "key"),
+                model: "test".into(),
+                reasoning: None,
+            },
+            tools: Vec::new(),
+            caller: Caller::new(
+                crate::principal::Principal::new(ScopeId::new("s"), "u"),
+                "req",
+                thread,
+                assistant,
+                budget_for(TurnLimits::default()),
+            ),
+            assistant_message_id: assistant,
+            user_message_id: user,
+            context: TurnContext::empty(),
+            limits: TurnLimits::default(),
+            action: ResumeAction::Denied {
+                request: ToolCallRequest {
+                    id: "call-1".into(),
+                    name: "demo_write".into(),
+                    arguments: json!({"value": "x"}),
+                },
+            },
+        };
+        let outcome = orchestrator.run_resumed_buffered(request).await.unwrap();
+        match outcome {
+            TurnOutcome::Completed(completion) => assert_eq!(completion.content, "done"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert_eq!(
+            provider.outputs.lock().unwrap().as_slice(),
+            std::slice::from_ref(&document),
+            "the resumed provider call must ask for the persisted document"
+        );
+        let message = store
+            .message(&ScopeId::new("s"), "u", assistant)
+            .await
+            .unwrap();
+        assert_eq!(message.status, MessageStatus::Complete);
+        assert_eq!(message.output_format, document);
     }
 }

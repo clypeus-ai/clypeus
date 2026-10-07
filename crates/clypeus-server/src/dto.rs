@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use clypeus_core::audit::AuditRecord;
 use clypeus_core::models::{ChatMessage, ProviderKind, TokenUsage, ToolSpec};
-use clypeus_core::provider::{ModelCatalog, ProbeReport};
+use clypeus_core::provider::{ModelCatalog, OutputFormat, ProbeReport};
 use clypeus_core::store::{
     Feedback, Message, MessageVersion, PersistedToolCall, ScopeSettings, Thread, ThreadView,
     ToolCallStatus, TurnUsage,
@@ -170,6 +170,9 @@ pub struct MessageDto {
     /// Reasoning level applied to this turn; `null` when no explicit override
     /// was requested.
     pub reasoning_level: Option<String>,
+    /// The shape this turn's answer was asked to take, recorded when the turn
+    /// began so a later resume can hold the provider to the same contract.
+    pub output_format: OutputFormat,
     pub status: String,
     pub error_detail: Option<String>,
     pub usage: Option<TokenUsage>,
@@ -197,6 +200,7 @@ impl From<Message> for MessageDto {
             context_json: message.context_json,
             model: message.model,
             reasoning_level: message.reasoning_level,
+            output_format: message.output_format,
             status: message.status.as_wire().to_string(),
             error_detail: message.error_detail,
             usage: message.usage,
@@ -329,6 +333,9 @@ pub struct CreateTurnRequest {
     pub content: String,
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text.
+    #[serde(default)]
+    pub output: OutputFormat,
     #[serde(default)]
     pub model: Option<String>,
     /// Open reasoning level. Must match one of the effective model's
@@ -347,6 +354,9 @@ pub struct EditTurnRequest {
     pub content: String,
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text.
+    #[serde(default)]
+    pub output: OutputFormat,
     #[serde(default)]
     pub model: Option<String>,
     /// Open reasoning level. Must match one of the effective model's
@@ -363,6 +373,9 @@ pub struct EditTurnRequest {
 pub struct RegenerateTurnRequest {
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text.
+    #[serde(default)]
+    pub output: OutputFormat,
     #[serde(default)]
     pub model: Option<String>,
     /// Open reasoning level. Must match one of the effective model's
@@ -395,6 +408,18 @@ pub struct SetFeedbackRequest {
     pub comment: Option<String>,
 }
 
+/// One header every provider request from a scope carries.
+///
+/// The value is a plain string on the wire: it is configuration the
+/// administrator typed, and the settings endpoint exists to show it back for
+/// editing. The core record holds it as a secret so logs cannot print it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHeaderDto {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScopeSettingsDto {
@@ -405,6 +430,7 @@ pub struct ScopeSettingsDto {
     pub api_key_stored: bool,
     pub timeout_ms: i32,
     pub max_output_tokens: i32,
+    pub headers: Vec<ProviderHeaderDto>,
     pub profile: serde_json::Value,
     pub extensions: serde_json::Value,
     pub created_at_utc: DateTime<Utc>,
@@ -426,6 +452,14 @@ impl From<ScopeSettings> for ScopeSettingsDto {
             api_key_stored: settings.api_key_present,
             timeout_ms: settings.timeout_ms,
             max_output_tokens: settings.max_output_tokens,
+            headers: settings
+                .headers
+                .into_iter()
+                .map(|header| ProviderHeaderDto {
+                    name: header.name,
+                    value: header.value.expose().to_string(),
+                })
+                .collect(),
             profile: serde_json::to_value(&settings.profile).unwrap_or(serde_json::Value::Null),
             extensions: settings.extensions,
             created_at_utc: settings.created_at,
@@ -451,6 +485,10 @@ pub struct UpdateScopeSettingsRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
+    /// Headers every provider request from this scope must carry. Absent keeps
+    /// the stored list; an empty list clears it.
+    #[serde(default)]
+    pub headers: Option<Vec<ProviderHeaderDto>>,
     /// Profile selection: `{"mode": "builtin"|"custom"|"disabled", ...}`.
     #[serde(default)]
     pub profile: Option<serde_json::Value>,
@@ -503,6 +541,10 @@ pub struct CompletionsRequest {
     pub tool_choice: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    /// The shape the answer must take. Absent means free text, which is what a model
+    /// produces unless it is told otherwise.
+    #[serde(default)]
+    pub output: OutputFormat,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

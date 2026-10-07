@@ -1,6 +1,6 @@
 [package]
-name = "clypeus-provider-openai"
-description = "OpenAI-compatible Chat Completions provider for Clypeus."
+name = "clypeus-provider-openai-responses"
+description = "OpenAI-compatible Responses API provider for Clypeus."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

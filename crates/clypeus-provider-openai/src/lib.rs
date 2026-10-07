@@ -64,7 +64,7 @@ impl OpenAiProvider {
         request: reqwest::RequestBuilder,
         config: &ProviderConfig,
     ) -> reqwest::RequestBuilder {
-        request.bearer_auth(config.api_key.expose())
+        config.apply_headers(request.bearer_auth(config.api_key.expose()))
     }
 }
 
@@ -376,6 +376,18 @@ pub fn build_payload(request: &CompletionRequest, stream: bool) -> Value {
         payload.insert(
             "tool_choice".into(),
             Value::String(request.tool_choice.as_wire().to_string()),
+        );
+    }
+    // Always strict: a schema a provider is free to ignore is a schema that turns a
+    // caller's hard requirement into a suggestion, and the failure would surface far from
+    // here as a parse error on an answer that looked successful.
+    if let clypeus_core::provider::OutputFormat::JsonSchema { name, schema } = &request.output {
+        payload.insert(
+            "response_format".into(),
+            json!({
+                "type": "json_schema",
+                "json_schema": {"name": name, "strict": true, "schema": schema},
+            }),
         );
     }
     payload.insert(
@@ -865,6 +877,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: clypeus_core::provider::ToolChoice::None,
             max_output_tokens: 128,
+            output: clypeus_core::provider::OutputFormat::Text,
         }
     }
 
@@ -1005,5 +1018,93 @@ mod tests {
         assert!(!has_reasoning(&request(None)));
         assert!(ProviderError::is_retryable_reasoning_failure(422));
         assert!(!ProviderError::is_retryable_reasoning_failure(500));
+    }
+
+    #[derive(Default)]
+    struct HeaderCapture {
+        requests: std::sync::Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
+    }
+
+    async fn capture_request(
+        axum::extract::State(capture): axum::extract::State<std::sync::Arc<HeaderCapture>>,
+        axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+        headers: axum::http::HeaderMap,
+    ) -> axum::Json<Value> {
+        let mut captured = std::collections::BTreeMap::new();
+        for (name, value) in &headers {
+            captured.insert(
+                name.as_str().to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            );
+        }
+        capture
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((uri.path().to_string(), captured));
+        axum::Json(json!({
+            "data": [{"id": "captured", "reasoning": {"levels": ["low"]}}],
+            "choices": [{"message": {"role": "assistant", "content": "captured answer"}}],
+        }))
+    }
+
+    async fn spawn_capture() -> (String, std::sync::Arc<HeaderCapture>) {
+        let capture = std::sync::Arc::new(HeaderCapture::default());
+        let router = axum::Router::new()
+            .route("/v1/models", axum::routing::get(capture_request))
+            .route("/v1/chat/completions", axum::routing::post(capture_request))
+            .with_state(std::sync::Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock provider binds");
+        let address = listener.local_addr().expect("mock address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (format!("http://{address}"), capture)
+    }
+
+    #[tokio::test]
+    async fn configured_headers_reach_the_catalog_and_the_completion() {
+        let (base_url, capture) = spawn_capture().await;
+        let config = ProviderConfig::new(base_url, "test-key")
+            .allow_private_targets(true)
+            .with_header("x-session-id", "stable-session")
+            .with_header("x-static", "fixed");
+        let provider = OpenAiProvider::new();
+        provider.catalog(&config).await.expect("catalog");
+        provider
+            .complete(&config, request(None))
+            .await
+            .expect("completion");
+
+        let requests = capture
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            requests.len(),
+            2,
+            "catalog and completion must both be sent"
+        );
+        assert_eq!(requests[0].0, "/v1/models");
+        assert_eq!(requests[1].0, "/v1/chat/completions");
+        for (path, headers) in requests.iter() {
+            assert_eq!(
+                headers.get("x-session-id").map(String::as_str),
+                Some("stable-session"),
+                "session header missing on {path}"
+            );
+            assert_eq!(
+                headers.get("x-static").map(String::as_str),
+                Some("fixed"),
+                "static header missing on {path}"
+            );
+            assert_eq!(
+                headers.get("authorization").map(String::as_str),
+                Some("Bearer test-key"),
+                "bearer auth missing on {path}"
+            );
+        }
     }
 }

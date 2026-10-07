@@ -251,6 +251,10 @@
           "model": {
             "type": "string"
           },
+          "output": {
+            "$ref": "#/components/schemas/OutputFormat",
+            "description": "The shape the answer must take. Absent means free text, which is what a model\nproduces unless it is told otherwise."
+          },
           "reasoningLevel": {
             "description": "Open reasoning level forwarded to the provider verbatim; absent, empty,\nand `\"default\"` send no override.",
             "type": [
@@ -348,6 +352,10 @@
               "null"
             ]
           },
+          "output": {
+            "$ref": "#/components/schemas/OutputFormat",
+            "description": "The shape the answer must take. Absent means free text."
+          },
           "pageContext": {
             "oneOf": [
               {
@@ -384,6 +392,10 @@
               "string",
               "null"
             ]
+          },
+          "output": {
+            "$ref": "#/components/schemas/OutputFormat",
+            "description": "The shape the answer must take. Absent means free text."
           },
           "pageContext": {
             "oneOf": [
@@ -578,6 +590,10 @@
               "null"
             ]
           },
+          "outputFormat": {
+            "$ref": "#/components/schemas/OutputFormat",
+            "description": "The shape this turn's answer was asked to take, recorded when the turn\nbegan so a later resume can hold the provider to the same contract."
+          },
           "parentMessageId": {
             "format": "uuid",
             "type": [
@@ -658,6 +674,7 @@
           "role",
           "content",
           "toolCalls",
+          "outputFormat",
           "status",
           "version",
           "versions",
@@ -753,6 +770,50 @@
           "models"
         ],
         "type": "object"
+      },
+      "OutputFormat": {
+        "description": "What shape the model's answer has to be in.\n\nA schema is not a stronger prompt. It is a constraint the provider itself enforces\nwhile the model decodes, so a caller that needs a document gets one or gets an error,\nrather than prose that a parser downstream has to guess at. Providers that cannot\nconstrain decoding say so through [`ProviderError::UnsupportedOutput`] instead of\naccepting the request and dropping the constraint.",
+        "oneOf": [
+          {
+            "description": "Free text, which is what a model produces unless it is told otherwise.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "text"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A JSON document conforming to `schema`, which every provider that supports this\nis asked for strictly: a schema that is merely suggested is a schema the model may\nignore, and a caller who needed the document would not learn that it had been.",
+            "properties": {
+              "name": {
+                "description": "The name the schema is registered under. Providers that require a name use\nit in their logs and error messages; it never reaches the model.",
+                "type": "string"
+              },
+              "schema": {
+                "description": "A JSON Schema the answer must validate against."
+              },
+              "type": {
+                "enum": [
+                  "json_schema"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "schema",
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "PageContextDto": {
         "properties": {
@@ -859,11 +920,28 @@
           }
         ]
       },
+      "ProviderHeaderDto": {
+        "description": "One header every provider request from a scope carries.\n\nThe value is a plain string on the wire: it is configuration the\nadministrator typed, and the settings endpoint exists to show it back for\nediting. The core record holds it as a secret so logs cannot print it.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
       "ProviderKind": {
         "description": "Provider backend a scope is configured to use.",
         "enum": [
           "openai",
-          "anthropic"
+          "anthropic",
+          "openai_responses"
         ],
         "type": "string"
       },
@@ -874,6 +952,10 @@
               "string",
               "null"
             ]
+          },
+          "output": {
+            "$ref": "#/components/schemas/OutputFormat",
+            "description": "The shape the answer must take. Absent means free text."
           },
           "pageContext": {
             "oneOf": [
@@ -974,6 +1056,12 @@
             ]
           },
           "extensions": {},
+          "headers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderHeaderDto"
+            },
+            "type": "array"
+          },
           "maxOutputTokens": {
             "format": "int32",
             "type": "integer"
@@ -1003,6 +1091,7 @@
           "apiKeyStored",
           "timeoutMs",
           "maxOutputTokens",
+          "headers",
           "profile",
           "extensions",
           "createdAtUtc"
@@ -1410,6 +1499,16 @@
           "defaultModel": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "headers": {
+            "description": "Headers every provider request from this scope must carry. Absent keeps\nthe stored list; an empty list clears it.",
+            "items": {
+              "$ref": "#/components/schemas/ProviderHeaderDto"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },

@@ -14,6 +14,13 @@ use utoipa::ToSchema;
 pub enum ProviderKind {
     Openai,
     Anthropic,
+    /// The OpenAI Responses API, which some models are served on exclusively.
+    /// It is a distinct backend because it is a distinct protocol: the same
+    /// model name answers `ModelProtocolUnsupported` on chat completions and
+    /// completes on `/v1/responses`, so a deployment must be able to say which
+    /// of the two shapes it speaks.
+    #[serde(rename = "openai_responses")]
+    OpenaiResponses,
 }
 
 impl ProviderKind {
@@ -21,6 +28,7 @@ impl ProviderKind {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::OpenaiResponses => "openai_responses",
         }
     }
 
@@ -28,6 +36,9 @@ impl ProviderKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "open_ai" => Some(Self::Openai),
             "anthropic" | "claude" => Some(Self::Anthropic),
+            "openai_responses" | "openai-responses" | "open_ai_responses" | "responses" => {
+                Some(Self::OpenaiResponses)
+            }
             _ => None,
         }
     }
@@ -177,7 +188,11 @@ mod tests {
 
     #[test]
     fn provider_kind_round_trips_and_parses_aliases() {
-        for kind in [ProviderKind::Openai, ProviderKind::Anthropic] {
+        for kind in [
+            ProviderKind::Openai,
+            ProviderKind::Anthropic,
+            ProviderKind::OpenaiResponses,
+        ] {
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(
                 ProviderKind::parse(json.trim_matches('"')),
@@ -187,6 +202,14 @@ mod tests {
         }
         assert_eq!(ProviderKind::parse("claude"), Some(ProviderKind::Anthropic));
         assert_eq!(ProviderKind::parse("OPEN_AI"), Some(ProviderKind::Openai));
+        assert_eq!(
+            ProviderKind::parse("openai-responses"),
+            Some(ProviderKind::OpenaiResponses)
+        );
+        assert_eq!(
+            ProviderKind::parse("open_ai_responses"),
+            Some(ProviderKind::OpenaiResponses)
+        );
         assert_eq!(ProviderKind::parse("other"), None);
     }
 

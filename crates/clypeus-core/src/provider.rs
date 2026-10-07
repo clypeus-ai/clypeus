@@ -24,6 +24,10 @@ use crate::secrets::SecretString;
 /// level value.
 pub const REASONING_NOT_AVAILABLE_CODE: &str = "provider_reasoning_not_available";
 
+/// Fixed error code returned when a provider cannot constrain a model's output to a
+/// schema. A caller that needs a document branches on this rather than on prose.
+pub const OUTPUT_NOT_AVAILABLE_CODE: &str = "provider_output_not_available";
+
 /// Transport-level provider failure. Only [`ProviderError::code`] and
 /// [`ProviderError::safe_message`] may leave the process.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -44,6 +48,8 @@ pub enum ProviderError {
     EmptyResponse,
     #[error("Provider does not recognize reasoning level '{value}' for model '{model}'")]
     UnsupportedReasoning { model: String, value: String },
+    #[error("Provider cannot be asked for a JSON document (model '{model}')")]
+    UnsupportedOutput { model: String },
 }
 
 impl ProviderError {
@@ -58,6 +64,7 @@ impl ProviderError {
             Self::Stream(_) => "provider_stream_error",
             Self::EmptyResponse => "provider_empty_response",
             Self::UnsupportedReasoning { .. } => REASONING_NOT_AVAILABLE_CODE,
+            Self::UnsupportedOutput { .. } => OUTPUT_NOT_AVAILABLE_CODE,
         }
     }
 
@@ -78,6 +85,9 @@ impl ProviderError {
             Self::UnsupportedReasoning { model, value } => format!(
                 "The provider does not support reasoning level '{value}' for model '{model}'."
             ),
+            Self::UnsupportedOutput { model } => {
+                format!("The provider cannot be asked for a JSON document with model '{model}'.")
+            }
         }
     }
 
@@ -98,6 +108,11 @@ pub struct ProviderConfig {
     /// When false (default), base URLs resolving to private, loopback or
     /// link-local addresses are rejected.
     pub allow_private_targets: bool,
+    /// Headers every request to this provider must carry, in insertion order.
+    /// A gateway that refuses traffic without one (a session header, for
+    /// example) otherwise looks like a provider with no models, because the
+    /// catalog request fails the same way the completions do.
+    pub headers: Vec<(String, SecretString)>,
 }
 
 impl ProviderConfig {
@@ -108,6 +123,7 @@ impl ProviderConfig {
             timeout: Duration::from_secs(60),
             max_output_tokens: 1_200,
             allow_private_targets: false,
+            headers: Vec::new(),
         }
     }
 
@@ -124,6 +140,23 @@ impl ProviderConfig {
     pub fn allow_private_targets(mut self, allow: bool) -> Self {
         self.allow_private_targets = allow;
         self
+    }
+
+    /// Adds a header every request to this provider carries. The value is held
+    /// as a secret because a header a provider requires in order to accept
+    /// traffic is usually a credential, and this struct derives `Debug`.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), SecretString::new(value)));
+        self
+    }
+
+    /// Applies every configured header to an outgoing request. Adapters call
+    /// this on each request, the model list included: a catalog that fails for
+    /// a missing header is indistinguishable from a provider with no models.
+    pub fn apply_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.headers.iter().fold(request, |request, (name, value)| {
+            request.header(name.as_str(), value.expose())
+        })
     }
 }
 
@@ -168,6 +201,31 @@ pub fn reasoning_override(value: Option<&str>) -> Option<&str> {
         .filter(|level| !level.is_empty() && *level != DEFAULT_REASONING_LEVEL)
 }
 
+/// What shape the model's answer has to be in.
+///
+/// A schema is not a stronger prompt. It is a constraint the provider itself enforces
+/// while the model decodes, so a caller that needs a document gets one or gets an error,
+/// rather than prose that a parser downstream has to guess at. Providers that cannot
+/// constrain decoding say so through [`ProviderError::UnsupportedOutput`] instead of
+/// accepting the request and dropping the constraint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutputFormat {
+    /// Free text, which is what a model produces unless it is told otherwise.
+    #[default]
+    Text,
+    /// A JSON document conforming to `schema`, which every provider that supports this
+    /// is asked for strictly: a schema that is merely suggested is a schema the model may
+    /// ignore, and a caller who needed the document would not learn that it had been.
+    JsonSchema {
+        /// The name the schema is registered under. Providers that require a name use
+        /// it in their logs and error messages; it never reaches the model.
+        name: String,
+        /// A JSON Schema the answer must validate against.
+        schema: serde_json::Value,
+    },
+}
+
 /// One provider completion request.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -179,6 +237,9 @@ pub struct CompletionRequest {
     pub tools: Vec<ToolSpec>,
     pub tool_choice: ToolChoice,
     pub max_output_tokens: i32,
+    /// The shape the answer must take. [`OutputFormat::Text`] unless the caller needs a
+    /// document.
+    pub output: OutputFormat,
 }
 
 /// Everything a provider answer carries beyond the text itself.
@@ -521,7 +582,8 @@ impl ProviderStream {
 /// A provider backend implementation.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
-    /// Stable provider identifier (`openai`, `anthropic`).
+    /// Stable provider identifier (`openai`, `anthropic`,
+    /// `openai_responses`).
     fn id(&self) -> &'static str;
 
     /// Fetches the model catalog.
@@ -790,6 +852,18 @@ mod tests {
         assert!(validate_base_url("http://[::1]:9000", false).is_err());
         assert!(validate_base_url("http://127.0.0.1:8080", true).is_ok());
         assert!(validate_base_url("http://example.invalid", true).is_ok());
+    }
+
+    #[test]
+    fn provider_config_collects_headers_in_order_without_logging_values() {
+        let config = ProviderConfig::new("https://example.com", "key")
+            .with_header("x-session-id", "stable-session")
+            .with_header("x-other", "another");
+        assert_eq!(config.headers.len(), 2);
+        assert_eq!(config.headers[0].0, "x-session-id");
+        assert_eq!(config.headers[0].1.expose(), "stable-session");
+        assert_eq!(config.headers[1].0, "x-other");
+        assert!(!format!("{config:?}").contains("stable-session"));
     }
 
     #[test]

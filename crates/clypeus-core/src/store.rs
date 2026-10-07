@@ -15,6 +15,8 @@ use uuid::Uuid;
 use crate::models::{ChatMessage, ProviderKind, TokenUsage};
 use crate::principal::ScopeId;
 use crate::profile::ProfileSelection;
+use crate::provider::OutputFormat;
+use crate::secrets::SecretString;
 
 /// Readiness probe contract. `Err` is a dependency failure with a safe detail
 /// string.
@@ -47,6 +49,24 @@ impl StoreError {
 // Scope settings
 // ---------------------------------------------------------------------------
 
+/// One header every provider request from a scope must carry.
+///
+/// A named pair rather than the positional tuple
+/// [`crate::provider::ProviderConfig`] carries, because this is the stored and
+/// administered shape: the SQL stores keep it as JSON text next to
+/// `extensions`, and a self-describing object is what an operator reading the
+/// column or the admin API can tell apart from a list of anything else.
+///
+/// The value is a [`SecretString`] so `ScopeSettings` — which derives `Debug`
+/// — and any warning that prints it cannot print the value. It is still stored
+/// in the clear, because it is configuration the scope's owner typed, not a
+/// credential the store holds only to replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHeader {
+    pub name: String,
+    pub value: SecretString,
+}
+
 /// Provider settings for one scope. The API key itself lives in a
 /// [`crate::secrets::SecretStore`]; this record only tracks whether one is
 /// present.
@@ -58,11 +78,25 @@ pub struct ScopeSettings {
     pub timeout_ms: i32,
     pub max_output_tokens: i32,
     pub api_key_present: bool,
+    /// Headers every provider request from this scope must carry.
+    pub headers: Vec<ProviderHeader>,
     pub profile: ProfileSelection,
     /// Domain fields owned by the application.
     pub extensions: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl ScopeSettings {
+    /// The configured headers in the shape
+    /// [`crate::provider::ProviderConfig`] carries: same names, same order,
+    /// every value still a secret.
+    pub fn provider_headers(&self) -> Vec<(String, SecretString)> {
+        self.headers
+            .iter()
+            .map(|header| (header.name.clone(), header.value.clone()))
+            .collect()
+    }
 }
 
 /// Partial update. `None` fields keep their stored value; `clear_api_key`
@@ -75,6 +109,7 @@ pub struct ScopeSettingsUpdate {
     pub timeout_ms: Option<i32>,
     pub max_output_tokens: Option<i32>,
     pub api_key_present: Option<bool>,
+    pub headers: Option<Vec<ProviderHeader>>,
     pub profile: Option<ProfileSelection>,
     pub extensions: Option<Value>,
 }
@@ -302,6 +337,10 @@ pub struct Message {
     pub context_json: Option<Value>,
     pub model: Option<String>,
     pub reasoning_level: Option<String>,
+    /// The shape this turn's answer was asked to take. Recorded when the turn
+    /// began so that a resume, which never sees the original request, can still
+    /// hold the provider to the same contract.
+    pub output_format: OutputFormat,
     pub status: MessageStatus,
     pub error_detail: Option<String>,
     pub usage: Option<TokenUsage>,
@@ -349,6 +388,7 @@ pub struct BeginTurn {
     pub reasoning_level: Option<String>,
     pub context_version: Option<String>,
     pub context_json: Option<Value>,
+    pub output: OutputFormat,
 }
 
 /// Message pair created by [`ConversationStore::begin_turn`].
@@ -370,6 +410,11 @@ pub struct AssistantFinish<'a> {
     pub usage: Option<&'a TokenUsage>,
     pub status: MessageStatus,
     pub error_detail: Option<&'a str>,
+    /// The shape the answer was asked to take. The row already carries it from
+    /// [`ConversationStore::begin_turn`]; repeating it here keeps every
+    /// terminal write, including the abandoned-turn guard, explicit about the
+    /// contract instead of silently leaving the stored value unverified.
+    pub output: &'a OutputFormat,
 }
 
 /// Usage report for one thread.
@@ -656,6 +701,7 @@ impl ScopeSettingsStore for StaticScopeSettings {
                 timeout_ms: 60_000,
                 max_output_tokens: 1_200,
                 api_key_present: false,
+                headers: Vec::new(),
                 profile: ProfileSelection::default(),
                 extensions: Value::Object(serde_json::Map::new()),
                 created_at: now,
@@ -678,6 +724,9 @@ impl ScopeSettingsStore for StaticScopeSettings {
         }
         if let Some(present) = update.api_key_present {
             entry.api_key_present = present;
+        }
+        if let Some(headers) = update.headers {
+            entry.headers = headers;
         }
         if let Some(profile) = update.profile {
             entry.profile = profile;

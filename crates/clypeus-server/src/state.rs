@@ -22,6 +22,7 @@ use clypeus_core::store::{
 };
 use clypeus_provider_anthropic::AnthropicProvider;
 use clypeus_provider_openai::OpenAiProvider;
+use clypeus_provider_openai_responses::OpenAiResponsesProvider;
 use clypeus_secret_file::FileSecretStore;
 use clypeus_store_memory::MemoryStore;
 
@@ -136,7 +137,11 @@ impl AppState {
         let providers = Arc::new(
             ProviderRegistry::new()
                 .register(ProviderKind::Openai, Arc::new(OpenAiProvider::new()))
-                .register(ProviderKind::Anthropic, Arc::new(AnthropicProvider::new())),
+                .register(ProviderKind::Anthropic, Arc::new(AnthropicProvider::new()))
+                .register(
+                    ProviderKind::OpenaiResponses,
+                    Arc::new(OpenAiResponsesProvider::new()),
+                ),
         );
 
         // Principal resolution.

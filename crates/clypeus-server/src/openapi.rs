@@ -63,6 +63,7 @@ use utoipa::OpenApi;
         crate::dto::SubmitApprovalRequest,
         crate::dto::SetFeedbackRequest,
         crate::dto::PageContextDto,
+        crate::dto::ProviderHeaderDto,
         crate::dto::ScopeSettingsDto,
         crate::dto::UpdateScopeSettingsRequest,
         crate::dto::ConnectionTestDto,
@@ -88,6 +89,7 @@ use utoipa::OpenApi;
         clypeus_core::models::ToolSpec,
         clypeus_core::models::ToolCall,
         clypeus_core::provider::ModelCapability,
+        clypeus_core::provider::OutputFormat,
         clypeus_core::profile::ProfileSelection,
     ))
 )]

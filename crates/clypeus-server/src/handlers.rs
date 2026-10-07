@@ -22,8 +22,8 @@ use clypeus_core::profile::ProfileSelection;
 use clypeus_core::provider::{ProviderConfig, validate_base_url};
 use clypeus_core::rate_limit::RateKey;
 use clypeus_core::store::{
-    CreateThread, MessageStatus, ScopeSettings, ScopeSettingsUpdate, ThreadUpdate, ToolCallStatus,
-    TurnTarget as StoreTurnTarget,
+    CreateThread, MessageStatus, ProviderHeader, ScopeSettings, ScopeSettingsUpdate, ThreadUpdate,
+    ToolCallStatus, TurnTarget as StoreTurnTarget,
 };
 use clypeus_core::tools::ToolError;
 use serde::Deserialize;
@@ -164,6 +164,7 @@ async fn resolve_provider(
         timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
         max_output_tokens: settings.max_output_tokens,
         allow_private_targets: state.config.core.allow_private_providers,
+        headers: settings.provider_headers(),
     };
     Ok((settings, config))
 }
@@ -205,6 +206,7 @@ pub async fn preview_models(
         timeout: Duration::from_secs(30),
         max_output_tokens: 1_200,
         allow_private_targets: state.config.core.allow_private_providers,
+        headers: Vec::new(),
     };
     let catalog = fetch_catalog(&state, request.provider_kind, &config).await?;
     Ok(Json(catalog.into()))
@@ -273,6 +275,7 @@ pub async fn completions(
             .max_output_tokens
             .unwrap_or(settings.max_output_tokens)
             .clamp(1, settings.max_output_tokens.max(1)),
+        output: request.output.clone(),
     };
 
     if request.stream {
@@ -440,6 +443,7 @@ pub async fn create_message(
             model: request.model,
             reasoning_level: request.reasoning_level,
             page_context: request.page_context.map(|context| context.to_value()),
+            output: request.output,
         },
     )
     .await
@@ -467,6 +471,7 @@ pub async fn edit_message(
             model: request.model,
             reasoning_level: request.reasoning_level,
             page_context: request.page_context.map(|context| context.to_value()),
+            output: request.output,
         },
     )
     .await
@@ -494,6 +499,7 @@ pub async fn regenerate_message(
             model: request.model,
             reasoning_level: request.reasoning_level,
             page_context: request.page_context.map(|context| context.to_value()),
+            output: request.output,
         },
     )
     .await
@@ -611,6 +617,7 @@ struct TurnPlan {
     model: Option<String>,
     reasoning_level: Option<String>,
     page_context: Option<Value>,
+    output: clypeus_core::provider::OutputFormat,
 }
 
 async fn run_turn(
@@ -648,6 +655,7 @@ async fn run_turn(
         context
     };
     let context_json = serde_json::to_value(&context).ok();
+    let plan_output = plan.output.clone();
     let profile_prompt = profile_prompt(state.prompt_profile.as_deref(), &settings.profile);
     let system = clypeus_core::context::build_system_message(profile_prompt.as_deref(), &context);
 
@@ -665,6 +673,7 @@ async fn run_turn(
                 reasoning_level: reasoning.clone(),
                 context_version: Some(context.version.clone()),
                 context_json,
+                output: plan_output.clone(),
             },
         )
         .await?;
@@ -702,6 +711,7 @@ async fn run_turn(
         assistant_message_id: started.assistant_message.id,
         context,
         limits,
+        output: plan_output,
     };
 
     if plan.stream {
@@ -1173,6 +1183,15 @@ pub async fn put_scope_settings(
     } else {
         None
     };
+    let headers = request.headers.map(|headers| {
+        headers
+            .into_iter()
+            .map(|header| ProviderHeader {
+                name: header.name,
+                value: clypeus_core::secrets::SecretString::new(header.value),
+            })
+            .collect()
+    });
     let settings = state
         .settings
         .upsert(
@@ -1184,6 +1203,7 @@ pub async fn put_scope_settings(
                 timeout_ms: request.timeout_ms,
                 max_output_tokens: request.max_output_tokens,
                 api_key_present,
+                headers,
                 profile,
                 extensions: Some(json!({"scopeId": scope.to_string()})),
             },
@@ -1228,6 +1248,7 @@ pub async fn admin_preview_models(
         timeout: Duration::from_secs(30),
         max_output_tokens: 1_200,
         allow_private_targets: state.config.core.allow_private_providers,
+        headers: Vec::new(),
     };
     let catalog = fetch_catalog(&state, request.provider_kind, &config).await?;
     Ok(Json(catalog.into()))

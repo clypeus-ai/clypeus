@@ -210,6 +210,7 @@ fn new_user_message(
         context_json: request.context_json.clone(),
         model: request.model.clone(),
         reasoning_level: request.reasoning_level.clone(),
+        output_format: request.output.clone(),
         status: MessageStatus::Complete,
         error_detail: None,
         usage: None,
@@ -253,6 +254,7 @@ impl ScopeSettingsStore for MemoryStore {
                 timeout_ms: 60_000,
                 max_output_tokens: 1_200,
                 api_key_present: false,
+                headers: Vec::new(),
                 profile: ProfileSelection::default(),
                 extensions: Value::Object(Map::new()),
                 created_at: now,
@@ -275,6 +277,9 @@ impl ScopeSettingsStore for MemoryStore {
         }
         if let Some(present) = update.api_key_present {
             settings.api_key_present = present;
+        }
+        if let Some(headers) = update.headers {
+            settings.headers = headers;
         }
         if let Some(profile) = update.profile {
             settings.profile = profile;
@@ -480,6 +485,7 @@ impl ConversationStore for MemoryStore {
             context_json: request.context_json.clone(),
             model: request.model.clone(),
             reasoning_level: request.reasoning_level.clone(),
+            output_format: request.output.clone(),
             status: MessageStatus::Pending,
             error_detail: None,
             usage: None,
@@ -537,6 +543,7 @@ impl ConversationStore for MemoryStore {
         message.reasoning_content = finish.reasoning.map(str::to_string);
         message.status = finish.status;
         message.error_detail = finish.error_detail.map(str::to_string);
+        message.output_format = finish.output.clone();
         message.usage = finish.usage.cloned();
         message.updated_at = Utc::now();
         message.completed_at = Some(Utc::now());

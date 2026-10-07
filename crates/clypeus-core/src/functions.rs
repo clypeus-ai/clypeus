@@ -25,7 +25,7 @@ use crate::metrics;
 use crate::models::{ChatMessage, ChatRole, ProviderKind, TokenUsage};
 use crate::principal::{Principal, ScopeId};
 use crate::provider::{
-    CompletionRequest, ProviderConfig, ProviderError, ProviderRegistry, ToolChoice,
+    CompletionRequest, OutputFormat, ProviderConfig, ProviderError, ProviderRegistry, ToolChoice,
 };
 use crate::rate_limit::{RateKey, RateLimiter};
 use crate::secrets::SecretStore;
@@ -488,6 +488,31 @@ impl FunctionRunError {
     }
 }
 
+/// What this attempt asks the provider for.
+///
+/// The schema is an improvement on the function's own validation, not a replacement for
+/// it. A provider that constrains decoding hands the function the document it declared and
+/// leaves the validation with less to catch; a provider that cannot is asked in the weaker
+/// form, where the validation and the repair loop below are what stand between the model's
+/// text and a stored record — which is all that ever stood there before schemas existed.
+fn output_for(name: &str, schema: Value, without_schema: bool) -> OutputFormat {
+    if without_schema {
+        return OutputFormat::Text;
+    }
+    OutputFormat::JsonSchema {
+        name: name.to_owned(),
+        schema,
+    }
+}
+
+/// Whether a failed attempt is the provider saying it cannot hold a schema.
+///
+/// True at most once per run: a provider that refused the schema will refuse it again, and
+/// asking twice would spend the function's repair budget on a question already answered.
+fn is_schema_refusal(error: &ProviderError, already_without_schema: bool) -> bool {
+    !already_without_schema && matches!(error, ProviderError::UnsupportedOutput { .. })
+}
+
 struct ProviderTarget {
     provider_kind: ProviderKind,
     config: ProviderConfig,
@@ -625,6 +650,10 @@ impl FunctionRunner {
 
         let mut messages = base_messages.clone();
         let mut attempts = 0u32;
+        // Set when the provider's protocol cannot express a schema and the function is
+        // asked for plain text instead. From then on every attempt in this run is plain
+        // text: a provider that refused once will refuse again.
+        let mut without_schema = false;
 
         let (output, diagnostics, usage) = loop {
             attempts += 1;
@@ -635,6 +664,18 @@ impl FunctionRunner {
                 tools: Vec::new(),
                 tool_choice: ToolChoice::None,
                 max_output_tokens,
+                // An AI function declares the document it returns and then validates what
+                // came back. Asking the provider for that same schema is what turns that
+                // validation into a check: a provider that constrains decoding gives the
+                // function the document it declared, and the loop below only has to deal
+                // with a model that wrote something the schema allows but the function
+                // does not want. The schema is an improvement on the validation, not a
+                // replacement for it, which is why the weaker ask below is survivable.
+                output: output_for(
+                    function.identity().as_str(),
+                    function.output_schema(),
+                    without_schema,
+                ),
             };
             let provider = target.provider_kind.as_wire();
             let outcome = match self
@@ -650,8 +691,52 @@ impl FunctionRunner {
                     metrics::record_provider_request(provider, "succeeded");
                     outcome
                 }
+                // A provider whose protocol cannot hold a schema is not a provider that
+                // cannot run functions: asked once more, in the weaker form, exactly as a
+                // reasoning level a provider does not recognise is asked again without.
+                // The degradation is recorded rather than silent — an operator whose
+                // provider cannot constrain decoding should be able to see that its
+                // answers are only as good as the validation.
+                Err(error) if is_schema_refusal(&error, without_schema) => {
+                    metrics::record_provider_request(provider, "output_format_unsupported");
+                    tracing::warn!(
+                        function = function.name(),
+                        %model,
+                        "provider cannot be asked for a document; retrying without the schema"
+                    );
+                    self.audit_function(
+                        principal,
+                        function.name(),
+                        &inputs,
+                        "output_format_unsupported",
+                        0,
+                        started.elapsed().as_millis() as i64,
+                    )
+                    .await;
+                    without_schema = true;
+                    // Not one of the answer attempts: nothing was asked that the model
+                    // answered badly, and spending one here would leave a function on a
+                    // provider without schemas a shorter repair budget than the same
+                    // function has on a provider with them.
+                    attempts -= 1;
+                    continue;
+                }
                 Err(error) => {
                     metrics::record_provider_request(provider, error.code());
+                    // The whole error, not the sentence the caller is given. A provider's
+                    // refusal carries the status and the provider's own words about what
+                    // it did not like, and collapsing that into "the provider rejected the
+                    // request" before anything writes it down leaves an operator with no
+                    // way to tell a wrong model from a wrong schema from a bad key. The
+                    // sentence stays what a person is shown; this is what an operator
+                    // reads.
+                    tracing::warn!(
+                        function = function.name(),
+                        %model,
+                        provider,
+                        error = ?error,
+                        "the provider refused a function run"
+                    );
                     self.audit_function(
                         principal,
                         function.name(),
@@ -770,6 +855,12 @@ impl FunctionRunner {
                 ));
             }
         };
+        // Taken from the stored settings rather than left to the caller: a header a
+        // gateway requires is part of the scope's provider configuration, exactly
+        // as the timeout and the output ceiling are, or a host that configured one
+        // could never make a catalog request succeed. Read before `base_url` moves
+        // out of the record below.
+        let headers = settings.provider_headers();
         let Some(base_url) = settings.base_url.filter(|url| !url.trim().is_empty()) else {
             return Err(FunctionRunError::unavailable(
                 "AI provider base URL is not configured.",
@@ -795,6 +886,7 @@ impl FunctionRunner {
             timeout: Duration::from_millis(u64::try_from(settings.timeout_ms).unwrap_or(60_000)),
             max_output_tokens: settings.max_output_tokens,
             allow_private_targets: self.allow_private_targets,
+            headers,
         };
         Ok(ProviderTarget {
             provider_kind: settings.provider_kind,
@@ -1034,6 +1126,49 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// A function asks for its own schema, and asks for plain text once the provider has
+    /// said it cannot hold one.
+    #[test]
+    fn a_function_asks_for_its_schema_until_the_provider_refuses_it() {
+        let schema = json!({"type": "object"});
+        assert_eq!(
+            output_for("summarize", schema.clone(), false),
+            OutputFormat::JsonSchema {
+                name: "summarize".to_owned(),
+                schema: schema.clone(),
+            }
+        );
+        assert_eq!(output_for("summarize", schema, true), OutputFormat::Text);
+    }
+
+    /// The refusal is recognised once and only once, and nothing else is mistaken for it.
+    ///
+    /// Recognising it twice would ask a provider the same question it has already answered,
+    /// and mistaking a transport failure for it would silently drop the schema from a
+    /// provider that could have honoured it.
+    #[test]
+    fn only_the_first_schema_refusal_degrades_the_request() {
+        let refusal = ProviderError::UnsupportedOutput {
+            model: "m".to_owned(),
+        };
+        assert!(is_schema_refusal(&refusal, false));
+        assert!(!is_schema_refusal(&refusal, true));
+
+        assert!(!is_schema_refusal(&ProviderError::Timeout, false));
+        assert!(!is_schema_refusal(
+            &ProviderError::Transport("connection reset".to_owned()),
+            false
+        ));
+        assert!(!is_schema_refusal(
+            &ProviderError::Upstream {
+                status: 400,
+                detail: "bad request".to_owned(),
+            },
+            false
+        ));
+        assert!(!is_schema_refusal(&ProviderError::EmptyResponse, false));
     }
 
     #[test]
