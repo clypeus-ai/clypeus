@@ -1328,7 +1328,7 @@ mod tests {
 
         assert!(!is_schema_refusal(&ProviderError::Timeout, false));
         assert!(!is_schema_refusal(
-            &ProviderError::Transport("connection reset".to_owned()),
+            &ProviderError::transport("connection reset"),
             false
         ));
         assert!(!is_schema_refusal(

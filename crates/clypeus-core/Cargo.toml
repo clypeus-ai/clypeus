@@ -32,6 +32,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 metrics-exporter-prometheus.workspace = true
+rustls.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

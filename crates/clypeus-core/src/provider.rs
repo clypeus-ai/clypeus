@@ -33,6 +33,38 @@ pub const OUTPUT_NOT_AVAILABLE_CODE: &str = "provider_output_not_available";
 /// the other protocol.
 pub const PROTOCOL_NOT_AVAILABLE_CODE: &str = "provider_protocol_not_available";
 
+/// Which layer of the connection to a provider broke.
+///
+/// The fixes belong to different people: a name that does not resolve is a base
+/// URL or a DNS problem, a refused or unreachable connection is a host or
+/// firewall problem, and a failed handshake is a certificate or proxy problem.
+/// One word for all three sends an operator to check all of them, so the
+/// classification happens here, where the transport error still carries its
+/// cause chain, and not at a call site that receives only a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    /// The host name could not be resolved.
+    Dns,
+    /// The connection could not be established.
+    Connect,
+    /// The TLS handshake or certificate verification failed.
+    Tls,
+    /// Any other transport failure: a reset, or a body read that was cut off.
+    Other,
+}
+
+impl TransportKind {
+    /// Stable machine-readable code for this layer.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Dns => "provider_dns_error",
+            Self::Connect => "provider_connect_error",
+            Self::Tls => "provider_tls_error",
+            Self::Other => "provider_unreachable",
+        }
+    }
+}
+
 /// Transport-level provider failure. Only [`ProviderError::code`] and
 /// [`ProviderError::safe_message`] may leave the process.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -43,8 +75,13 @@ pub enum ProviderError {
     Timeout,
     #[error("Provider returned status {status}: {detail}")]
     Upstream { status: u16, detail: String },
-    #[error("Provider transport error: {0}")]
-    Transport(String),
+    #[error("Provider transport failure ({kind:?}): {detail}")]
+    Transport {
+        /// The layer that broke; see [`TransportKind`].
+        kind: TransportKind,
+        /// The full cause chain, outermost first.
+        detail: String,
+    },
     #[error("Provider returned an unparseable payload: {0}")]
     InvalidPayload(String),
     #[error("Provider stream failed: {0}")]
@@ -75,7 +112,7 @@ impl ProviderError {
             Self::InvalidBaseUrl(_) => "provider_invalid_base_url",
             Self::Timeout => "provider_timeout",
             Self::Upstream { .. } => "provider_unavailable",
-            Self::Transport(_) => "provider_unreachable",
+            Self::Transport { kind, .. } => kind.code(),
             Self::InvalidPayload(_) => "provider_invalid_response",
             Self::Stream(_) => "provider_stream_error",
             Self::EmptyResponse => "provider_empty_response",
@@ -87,15 +124,29 @@ impl ProviderError {
     }
 
     /// Safe client-facing message. The detail of `InvalidBaseUrl` stays visible
-    /// because it describes the administrator's own input.
+    /// because it describes the administrator's own input; for the same reason
+    /// the transport cause chain, the status and the provider's own sentence
+    /// stay visible too. A gateway reported as merely "unreachable" when the
+    /// real answer was a DNS failure or `HTTP 401: missing key` is a gateway an
+    /// operator cannot act on, and none of those strings carries a credential:
+    /// a request header never appears in a `reqwest` error, and provider text
+    /// is bounded by [`MAX_DETAIL_CHARS`].
     pub fn safe_message(&self) -> String {
         match self {
             Self::InvalidBaseUrl(detail) => detail.clone(),
             Self::Timeout => "The provider timed out.".to_string(),
-            Self::Upstream { .. } => "The provider rejected the request.".to_string(),
-            Self::Transport(_) => "The provider is unreachable.".to_string(),
-            Self::InvalidPayload(_) => "The provider returned an invalid response.".to_string(),
-            Self::Stream(_) => "The provider stream failed.".to_string(),
+            Self::Upstream { status, detail } => format!(
+                "The provider returned HTTP {status}: {}",
+                bounded_detail(detail)
+            ),
+            Self::Transport { detail, .. } => bounded_detail(detail),
+            Self::InvalidPayload(detail) => format!(
+                "The provider returned an invalid response: {}",
+                bounded_detail(detail)
+            ),
+            Self::Stream(detail) => {
+                format!("The provider stream failed: {}", bounded_detail(detail))
+            }
             Self::EmptyResponse => "The provider completed the turn without an answer.".to_string(),
             Self::RateLimited { retry_after_secs } => match retry_after_secs {
                 Some(seconds) => {
@@ -115,10 +166,134 @@ impl ProviderError {
         }
     }
 
+    /// A transport failure recorded from a cause that is already text.
+    ///
+    /// Used where the failure is not a `reqwest` send: a stream dies mid-read, a
+    /// store fails, a provider is missing from the registry. The layer is read
+    /// from the text, and text that names none is [`TransportKind::Other`].
+    pub fn transport(detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        let kind = classify_transport_markers(&detail);
+        Self::Transport { kind, detail }
+    }
+
+    /// Classifies a `reqwest` failure at the layer it broke.
+    ///
+    /// A deadline becomes [`Self::Timeout`]. Everything else keeps the full
+    /// cause chain, because the top-level Display of a `reqwest` error is
+    /// "error sending request for url (...)" and names nothing: DNS, a refused
+    /// connection and a failed handshake are distinguishable only in the
+    /// sources beneath it.
+    pub fn transport_error(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            return Self::Timeout;
+        }
+        let detail = error_chain(&error);
+        let named = classify_transport_markers(&detail);
+        let kind = if named == TransportKind::Other && error.is_connect() {
+            TransportKind::Connect
+        } else {
+            named
+        };
+        Self::Transport { kind, detail }
+    }
+
     /// Upstream HTTP statuses that suggest a reasoning parameter was rejected.
     /// Providers retry once without reasoning on these.
     pub fn is_retryable_reasoning_failure(status: u16) -> bool {
         matches!(status, 400 | 404 | 405 | 415 | 422 | 502 | 503)
+    }
+}
+
+/// Longest provider-supplied text one safe message may carry.
+///
+/// A transport chain and a gateway's own error body are written for machines,
+/// and a problem document is not a log. The value that constructed the error
+/// keeps the full text; only what leaves the process is bounded.
+const MAX_DETAIL_CHARS: usize = 512;
+
+/// Trims a provider-supplied detail and bounds it at [`MAX_DETAIL_CHARS`].
+fn bounded_detail(detail: &str) -> String {
+    let trimmed = detail.trim();
+    if trimmed.chars().count() <= MAX_DETAIL_CHARS {
+        return trimmed.to_owned();
+    }
+    let mut bounded: String = trimmed.chars().take(MAX_DETAIL_CHARS).collect();
+    bounded.push('…');
+    bounded
+}
+
+/// The full cause chain of a failure, outermost first.
+///
+/// `reqwest::Error`'s own Display names only the URL; the layer is in the
+/// sources: "dns error: error resolving DNS: failed to lookup address
+/// information: Name or service not known".
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
+/// The resolver and connector phrases a DNS failure carries in its Display.
+///
+/// The first entry is the hyper connector's own layer name and is what holds
+/// across platforms; the rest are the libc messages underneath it, kept so the
+/// chain names the OS reason even when the middle layer changes.
+const DNS_MARKERS: [&str; 7] = [
+    "dns error",
+    "error resolving dns",
+    "failed to lookup address information",
+    "name or service not known",
+    "nodename nor servname provided",
+    "no such host",
+    "temporary failure in name resolution",
+];
+
+/// The rustls phrases a failed handshake or a rejected certificate carries.
+///
+/// A TLS failure reaches the chain as a `tokio-rustls`-wrapped `std::io::Error`
+/// whose message is rustls's own Display verbatim (measured: a plaintext server
+/// answers a ClientHello with "received corrupt message of type
+/// InvalidContentType" and nothing else), and the wrapped error is not reachable
+/// for a downcast. The test builds real `rustls::Error` values through the
+/// variants a peer can trigger, so the list is checked against the type that
+/// emits it.
+const TLS_MARKERS: [&str; 14] = [
+    "received corrupt message",
+    "received unexpected message",
+    "invalid peer certificate",
+    "invalid certificate revocation list",
+    "peer sent no certificates",
+    "received fatal alert",
+    "handshake not complete",
+    "peer is incompatible",
+    "peer misbehaved",
+    "cannot decrypt peer's message",
+    "encrypted client hello failure",
+    "peer sent excess record size",
+    "presented server name type wasn't supported",
+    "peer doesn't support any known protocol",
+];
+
+/// Names the failure layer from the Display text of a cause chain.
+///
+/// DNS is checked first: its leaviest message ("failed to lookup address
+/// information") is what the resolver prints, while a TLS failure never names a
+/// resolver. Text that names neither is [`TransportKind::Other`]; whether that
+/// becomes a connect error is for [`ProviderError::transport_error`] to decide
+/// from `reqwest::Error::is_connect`, not for this function to guess.
+fn classify_transport_markers(detail: &str) -> TransportKind {
+    let lowered = detail.to_ascii_lowercase();
+    if DNS_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+        TransportKind::Dns
+    } else if TLS_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+        TransportKind::Tls
+    } else {
+        TransportKind::Other
     }
 }
 
@@ -554,7 +729,7 @@ impl ProviderStream {
                 }
                 Some(Err(error)) => {
                     self.finished = true;
-                    return Some(Err(ProviderError::Transport(error.to_string())));
+                    return Some(Err(ProviderError::transport(error.to_string())));
                 }
                 None => {
                     self.finished = true;
@@ -1104,5 +1279,188 @@ mod tests {
             .safe_message(),
             "The provider does not serve model 'm' on this protocol."
         );
+    }
+
+    #[test]
+    fn an_upstream_failure_states_the_status_and_the_providers_own_sentence() {
+        let error = ProviderError::Upstream {
+            status: 401,
+            detail: "Missing API key".to_owned(),
+        };
+        assert_eq!(
+            error.safe_message(),
+            "The provider returned HTTP 401: Missing API key"
+        );
+        assert_eq!(error.code(), "provider_unavailable");
+    }
+
+    #[test]
+    fn a_transport_chain_names_its_layer_and_keeps_the_cause() {
+        for (kind, detail) in [
+            (
+                TransportKind::Dns,
+                "error sending request for url (http://x.invalid/v1/models): client error \
+                 (Connect): dns error: error resolving DNS: failed to lookup address \
+                 information: Name or service not known",
+            ),
+            (
+                TransportKind::Tls,
+                "error sending request for url (https://127.0.0.1:1/v1/models): client error \
+                 (Connect): received corrupt message of type InvalidContentType",
+            ),
+            (
+                TransportKind::Connect,
+                "error sending request for url (http://127.0.0.1:1/v1/models): client error \
+                 (Connect): tcp connect error: Connection refused (os error 111)",
+            ),
+        ] {
+            let error = ProviderError::Transport {
+                kind,
+                detail: detail.to_owned(),
+            };
+            assert_eq!(error.code(), kind.code());
+            assert!(error.safe_message().contains(detail), "{detail}");
+        }
+        assert_eq!(TransportKind::Dns.code(), "provider_dns_error");
+        assert_eq!(TransportKind::Tls.code(), "provider_tls_error");
+        assert_eq!(TransportKind::Connect.code(), "provider_connect_error");
+        assert_eq!(TransportKind::Other.code(), "provider_unreachable");
+    }
+
+    #[test]
+    fn the_tls_marker_list_covers_the_rustls_refusals_it_names() {
+        // Real `rustls::Error` values, formatted by rustls itself: the wrapped
+        // handshake error reaches the chain as this Display text and nothing
+        // else, so the marker list is checked against the type that emits it.
+        for error in [
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
+            rustls::Error::NoCertificatesPresented,
+            rustls::Error::InvalidMessage(rustls::InvalidMessage::InvalidContentType),
+            rustls::Error::DecryptError,
+            rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure),
+            rustls::Error::PeerIncompatible(rustls::PeerIncompatible::NoCipherSuitesInCommon),
+            rustls::Error::PeerMisbehaved(rustls::PeerMisbehaved::IllegalMiddleboxChangeCipherSpec),
+            rustls::Error::HandshakeNotComplete,
+            rustls::Error::NoApplicationProtocol,
+        ] {
+            let text = error.to_string();
+            assert_eq!(
+                classify_transport_markers(&text),
+                TransportKind::Tls,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_detail_is_bounded_but_its_head_survives() {
+        for error in [
+            ProviderError::InvalidPayload("y".repeat(MAX_DETAIL_CHARS + 64)),
+            ProviderError::Stream("z".repeat(MAX_DETAIL_CHARS + 64)),
+        ] {
+            let message = error.safe_message();
+            assert!(message.contains('…'), "{message}");
+            assert!(!message.contains(&"y".repeat(MAX_DETAIL_CHARS + 1)));
+            assert!(!message.contains(&"z".repeat(MAX_DETAIL_CHARS + 1)));
+        }
+        assert_eq!(
+            ProviderError::transport("  stated cause  ").safe_message(),
+            "stated cause"
+        );
+    }
+
+    /// Binds a listener, then drops it, leaving a port nothing accepts on.
+    async fn closed_port() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        drop(listener);
+        address
+    }
+
+    /// A listener that accepts and then holds the connection, so a deadline or
+    /// a handshake can be observed instead of a closed socket.
+    async fn holding_listener(reply: Option<&'static [u8]>) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                if let Some(reply) = reply {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = socket.write_all(reply).await;
+                }
+                held.push(socket);
+            }
+        });
+        address
+    }
+
+    #[tokio::test]
+    async fn a_resolution_failure_is_named_dns() {
+        let error = reqwest::Client::new()
+            .get("http://a-host-that-does-not-resolve.invalid/v1/models")
+            .send()
+            .await
+            .expect_err("must not resolve");
+        match ProviderError::transport_error(error) {
+            ProviderError::Transport { kind, detail } => {
+                assert_eq!(kind, TransportKind::Dns);
+                assert!(detail.to_lowercase().contains("dns"), "{detail}");
+            }
+            other => panic!("expected a transport failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_named_connect() {
+        let address = closed_port().await;
+        let error = reqwest::Client::new()
+            .get(format!("http://{address}/v1/models"))
+            .send()
+            .await
+            .expect_err("must refuse");
+        match ProviderError::transport_error(error) {
+            ProviderError::Transport { kind, detail } => {
+                assert_eq!(kind, TransportKind::Connect);
+                assert!(detail.to_lowercase().contains("connect"), "{detail}");
+            }
+            other => panic!("expected a transport failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_answer_to_https_is_named_tls() {
+        let address = holding_listener(Some(b"not tls at all\n")).await;
+        let error = reqwest::Client::new()
+            .get(format!("https://{address}/v1/models"))
+            .send()
+            .await
+            .expect_err("must fail the handshake");
+        match ProviderError::transport_error(error) {
+            ProviderError::Transport { kind, detail } => {
+                assert_eq!(kind, TransportKind::Tls, "{detail}");
+            }
+            other => panic!("expected a transport failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deadline_is_named_timeout() {
+        let address = holding_listener(None).await;
+        let error = reqwest::Client::new()
+            .get(format!("http://{address}/v1/models"))
+            .timeout(Duration::from_millis(250))
+            .send()
+            .await
+            .expect_err("must time out");
+        assert!(matches!(
+            ProviderError::transport_error(error),
+            ProviderError::Timeout
+        ));
     }
 }

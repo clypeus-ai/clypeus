@@ -539,7 +539,7 @@ impl Orchestrator {
             .message(caller.scope(), caller.subject(), assistant_message_id)
             .await
             .map(|message| message.output_format)
-            .map_err(|error| ProviderError::Transport(error.to_string()))
+            .map_err(|error| ProviderError::transport(error.to_string()))
     }
 
     /// Persists the terminal state of a buffered outcome.
@@ -849,7 +849,7 @@ impl Orchestrator {
                 request.assistant_message_id,
             )
             .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
+            .map_err(|error| ProviderError::transport(error.to_string()))?;
 
         let turn = TurnRequest {
             provider_kind: request.provider.provider_kind,
@@ -1182,7 +1182,7 @@ impl Orchestrator {
         let provider = self
             .providers
             .get(request.provider_kind)
-            .ok_or_else(|| ProviderError::Transport("provider is not registered".to_string()))?;
+            .ok_or_else(|| ProviderError::transport("provider is not registered"))?;
         let outcome = provider
             .complete(&request.provider, completion.clone())
             .await;
@@ -1222,7 +1222,7 @@ impl Orchestrator {
         let provider = self
             .providers
             .get(request.provider_kind)
-            .ok_or_else(|| ProviderError::Transport("provider is not registered".to_string()))?;
+            .ok_or_else(|| ProviderError::transport("provider is not registered"))?;
         let mut stream: ProviderStream = provider
             .stream(&request.provider, completion.clone())
             .await?;
@@ -1502,7 +1502,7 @@ pub fn resolved_provider(
 
 /// Maps a store error to the closest provider error for turn persistence.
 pub fn store_error_to_provider(error: StoreError) -> ProviderError {
-    ProviderError::Transport(error.to_string())
+    ProviderError::transport(error.to_string())
 }
 
 #[cfg(test)]
@@ -2207,7 +2207,7 @@ mod tests {
                 _config: &ProviderConfig,
                 _request: CompletionRequest,
             ) -> Result<ProviderStream, ProviderError> {
-                Err(ProviderError::Transport("buffered only".into()))
+                Err(ProviderError::transport("buffered only"))
             }
         }
 

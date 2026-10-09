@@ -81,7 +81,7 @@ impl Provider for OpenAiProvider {
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(map_send_error)?;
+            .map_err(ProviderError::transport_error)?;
         let status = response.status();
         let content_type = response
             .headers()
@@ -95,7 +95,7 @@ impl Provider for OpenAiProvider {
         let body = response
             .text()
             .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
+            .map_err(ProviderError::transport_error)?;
         if !status.is_success() {
             return Err(response_error(
                 status.as_u16(),
@@ -124,7 +124,7 @@ impl Provider for OpenAiProvider {
                 .header("accept", "application/json")
                 .send()
                 .await
-                .map_err(map_send_error)?;
+                .map_err(ProviderError::transport_error)?;
             Ok::<_, ProviderError>(response)
         }
         .await;
@@ -188,13 +188,13 @@ impl Provider for OpenAiProvider {
             .timeout(config.timeout)
             .send()
             .await
-            .map_err(map_send_error)?;
+            .map_err(ProviderError::transport_error)?;
         let status = response.status();
         let retry_after = retry_after_from_headers(response.headers());
         let body = response
             .text()
             .await
-            .map_err(|error| ProviderError::Transport(error.to_string()))?;
+            .map_err(ProviderError::transport_error)?;
 
         if status.is_success() {
             let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
@@ -215,7 +215,7 @@ impl Provider for OpenAiProvider {
                     .timeout(config.timeout)
                     .send()
                     .await
-                    .map_err(map_send_error)?;
+                    .map_err(ProviderError::transport_error)?;
                 let retry_status = retry.status();
                 let retry_body = retry.text().await.unwrap_or_default();
                 if retry_status.is_success() {
@@ -245,7 +245,7 @@ impl Provider for OpenAiProvider {
                 .timeout(config.timeout)
                 .send()
                 .await
-                .map_err(map_send_error)?;
+                .map_err(ProviderError::transport_error)?;
             let retry_status = retry.status();
             let retry_hint = retry_after_from_headers(retry.headers());
             let retry_body = retry.text().await.unwrap_or_default();
@@ -352,15 +352,7 @@ impl OpenAiProvider {
         )
         .await
         .map_err(|_| ProviderError::Timeout)?
-        .map_err(map_send_error)
-    }
-}
-
-fn map_send_error(error: reqwest::Error) -> ProviderError {
-    if error.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Transport(error.to_string())
+        .map_err(ProviderError::transport_error)
     }
 }
 
