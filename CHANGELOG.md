@@ -10,6 +10,16 @@ protocol and a provider rate limit each get an answer of their own.
 
 ### Added
 
+* `clypeus-provider-open-responses`: a provider for the Open Responses
+  standard (openresponses.org), registered as `ProviderKind::OpenResponses`
+  (`open_responses`). The request carries typed input items and
+  `store: false`; the stream is read as the standard's semantic events and
+  must end with a terminal response event — `response.failed` and
+  `response.incomplete` are errors, not answers, and the `[DONE]` sentinel is
+  accepted but never required. Data that is not JSON is a protocol violation,
+  not text to render. The kind falls back to `openai_responses` when a server
+  refuses the standard's dialect, because the standard is built on that API's
+  shape.
 * `clypeus-core`: `OutputFormat` (`Text`, the default, or `JsonSchema { name,
   schema }`) carried on `CompletionRequest::output` and `TurnRequest::output`,
   and `ProviderError::UnsupportedOutput` with the stable code

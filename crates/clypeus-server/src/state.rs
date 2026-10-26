@@ -21,6 +21,7 @@ use clypeus_core::store::{
     ApprovalStore, ConversationStore, Readiness, ScopeSettingsStore, ScopeSettingsUpdate,
 };
 use clypeus_provider_anthropic::AnthropicProvider;
+use clypeus_provider_open_responses::OpenResponsesProvider;
 use clypeus_provider_openai::OpenAiProvider;
 use clypeus_provider_openai_responses::OpenAiResponsesProvider;
 use clypeus_secret_file::FileSecretStore;
@@ -141,6 +142,10 @@ impl AppState {
                 .register(
                     ProviderKind::OpenaiResponses,
                     Arc::new(OpenAiResponsesProvider::new()),
+                )
+                .register(
+                    ProviderKind::OpenResponses,
+                    Arc::new(OpenResponsesProvider::new()),
                 ),
         );
 

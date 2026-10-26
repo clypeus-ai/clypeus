@@ -21,6 +21,15 @@ pub enum ProviderKind {
     /// of the two shapes it speaks.
     #[serde(rename = "openai_responses")]
     OpenaiResponses,
+    /// The Open Responses standard (openresponses.org): the portable spelling
+    /// of the responses shape, standardized for multi-provider use. It is a
+    /// distinct backend because it is a distinct contract on the wire: typed
+    /// input items, a terminal response event that ends every stream (the
+    /// `[DONE]` sentinel is optional), a typed error envelope, and
+    /// implementor-prefixed extensions. A server behind this kind is asked to
+    /// speak the standard, not OpenAI's own dialect of it.
+    #[serde(rename = "open_responses")]
+    OpenResponses,
 }
 
 impl ProviderKind {
@@ -29,6 +38,7 @@ impl ProviderKind {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
             Self::OpenaiResponses => "openai_responses",
+            Self::OpenResponses => "open_responses",
         }
     }
 
@@ -38,10 +48,15 @@ impl ProviderKind {
     /// responses, refusing the wrong shape with `ModelProtocolUnsupported`. The
     /// two OpenAI kinds are alternatives for one service; Anthropic is a
     /// different API, not another spelling of the same one.
+    ///
+    /// Open Responses falls back to the OpenAI Responses kind because the
+    /// standard is built on that API's shape and a server implementing the
+    /// standard usually accepts OpenAI's own dialect of it as well.
     pub const fn alternate_protocol(self) -> Option<Self> {
         match self {
             Self::Openai => Some(Self::OpenaiResponses),
             Self::OpenaiResponses => Some(Self::Openai),
+            Self::OpenResponses => Some(Self::OpenaiResponses),
             Self::Anthropic => None,
         }
     }
@@ -50,6 +65,7 @@ impl ProviderKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "open_ai" => Some(Self::Openai),
             "anthropic" | "claude" => Some(Self::Anthropic),
+            "open_responses" | "open-responses" | "openresponses" => Some(Self::OpenResponses),
             "openai_responses" | "openai-responses" | "open_ai_responses" | "responses" => {
                 Some(Self::OpenaiResponses)
             }
@@ -206,6 +222,7 @@ mod tests {
             ProviderKind::Openai,
             ProviderKind::Anthropic,
             ProviderKind::OpenaiResponses,
+            ProviderKind::OpenResponses,
         ] {
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(
@@ -224,6 +241,14 @@ mod tests {
             ProviderKind::parse("open_ai_responses"),
             Some(ProviderKind::OpenaiResponses)
         );
+        assert_eq!(
+            ProviderKind::parse("open-responses"),
+            Some(ProviderKind::OpenResponses)
+        );
+        assert_eq!(
+            ProviderKind::parse("openresponses"),
+            Some(ProviderKind::OpenResponses)
+        );
         assert_eq!(ProviderKind::parse("other"), None);
     }
 
@@ -238,6 +263,15 @@ mod tests {
             Some(ProviderKind::Openai)
         );
         assert_eq!(ProviderKind::Anthropic.alternate_protocol(), None);
+    }
+
+    #[test]
+    fn the_standard_kind_falls_back_to_the_openai_dialect() {
+        assert_eq!(
+            ProviderKind::OpenResponses.alternate_protocol(),
+            Some(ProviderKind::OpenaiResponses)
+        );
+        assert_eq!(ProviderKind::OpenResponses.as_wire(), "open_responses");
     }
 
     #[test]

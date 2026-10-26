@@ -317,6 +317,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clypeus-provider-open-responses"
+version = "1.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "clypeus-core",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "clypeus-provider-openai"
 version = "1.2.0"
 dependencies = [
@@ -369,6 +384,7 @@ dependencies = [
  "clypeus-conformance",
  "clypeus-core",
  "clypeus-provider-anthropic",
+ "clypeus-provider-open-responses",
  "clypeus-provider-openai",
  "clypeus-provider-openai-responses",
  "clypeus-secret-file",

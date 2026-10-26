@@ -941,7 +941,8 @@
         "enum": [
           "openai",
           "anthropic",
-          "openai_responses"
+          "openai_responses",
+          "open_responses"
         ],
         "type": "string"
       },
